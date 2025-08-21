@@ -3941,248 +3941,370 @@ class DouyinYouTubeTool:
             self.stat_labels[title].config(text=str(value))
 
     def open_upload_config(self):
-        """Open comprehensive upload configuration popup window"""
+        """Open comprehensive upload configuration popup window with optimized UI"""
         config_window = tk.Toplevel(self.root)
         config_window.title("⚙️ YouTube Upload Configuration")
-        config_window.geometry("800x700")
+        config_window.geometry("900x750")
         config_window.resizable(True, True)
         config_window.transient(self.root)
         config_window.grab_set()
         
-        # Configure colors
-        config_window.configure(bg=self.colors['light'])
+        # Center the window
+        config_window.update_idletasks()
+        x = (config_window.winfo_screenwidth() // 2) - (900 // 2)
+        y = (config_window.winfo_screenheight() // 2) - (750 // 2)
+        config_window.geometry(f"900x750+{x}+{y}")
         
-        # Create scrollable frame
-        main_canvas = tk.Canvas(config_window, bg=self.colors['light'])
-        scrollbar = ttk.Scrollbar(config_window, orient="vertical", command=main_canvas.yview)
-        scrollable_frame = tk.Frame(main_canvas, bg=self.colors['light'])
+        # Configure window
+        config_window.configure(bg=self.colors['background'])
         
+        # Header with title and description
+        header_frame = tk.Frame(config_window, bg=self.colors['primary'], height=80)
+        header_frame.pack(fill=tk.X)
+        header_frame.pack_propagate(False)
+        
+        tk.Label(header_frame, text="⚙️ YouTube Upload Configuration", 
+                font=('Segoe UI', 16, 'bold'), bg=self.colors['primary'], fg='white').pack(pady=15)
+        tk.Label(header_frame, text="Configure your video upload settings to match YouTube Creator Studio", 
+                font=('Segoe UI', 10), bg=self.colors['primary'], fg='white').pack()
+        
+        # Main container with padding
+        main_container = tk.Frame(config_window, bg=self.colors['background'])
+        main_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Create scrollable frame with better styling
+        canvas = tk.Canvas(main_container, bg=self.colors['background'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(main_container, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas, bg=self.colors['background'])
+        
+        # Configure scrolling
         scrollable_frame.bind(
             "<Configure>",
-            lambda e: main_canvas.configure(scrollregion=main_canvas.bbox("all"))
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
         )
         
-        main_canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        main_canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
         
-        main_canvas.pack(side="left", fill="both", expand=True, padx=15, pady=15)
+        # Pack canvas and scrollbar
+        canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         
-        # Bind mousewheel
+        # Enhanced mousewheel binding
         def _on_mousewheel(event):
-            main_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        main_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
         
-        # === BASIC DETAILS SECTION ===
-        details_frame = tk.LabelFrame(scrollable_frame, text="📝 Basic Details", 
-                                    bg=self.colors['background'], fg=self.colors['primary'],
-                                    font=('Segoe UI', 11, 'bold'), padx=15, pady=15)
-        details_frame.pack(fill=tk.X, pady=(0,15))
+        def _bind_to_mousewheel(event):
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
         
-        # Title Template
-        tk.Label(details_frame, text="🎬 Title Template:", font=('Segoe UI', 10, 'bold'),
-                bg=self.colors['background'], fg=self.colors['dark']).pack(anchor=tk.W, pady=(0,5))
+        def _unbind_from_mousewheel(event):
+            canvas.unbind_all("<MouseWheel>")
+        
+        canvas.bind('<Enter>', _bind_to_mousewheel)
+        canvas.bind('<Leave>', _unbind_from_mousewheel)
+        
+        # === SECTION 1: VIDEO DETAILS ===
+        details_section = self.create_config_section(scrollable_frame, "📝 Video Details", 
+                                                    "Configure title, description and tags for your videos")
+        
+        # Title Template with enhanced styling
+        title_frame = self.create_config_field_frame(details_section)
+        self.create_config_label(title_frame, "🎬 Title Template", 
+                                "Template for video titles (use [FILENAME] as placeholder)")
         self.config_title_var = tk.StringVar(value=self.upload_settings.get('title_template', '[FILENAME]'))
-        title_entry = tk.Entry(details_frame, textvariable=self.config_title_var, width=80,
-                              bg='white', fg=self.colors['dark'], font=('Segoe UI', 10))
-        title_entry.pack(fill=tk.X, pady=(0,5))
-        tk.Label(details_frame, text="💡 Use [FILENAME] as placeholder for video filename",
-                font=('Segoe UI', 9), bg=self.colors['background'], fg=self.colors['medium']).pack(anchor=tk.W, pady=(0,10))
+        title_entry = tk.Entry(title_frame, textvariable=self.config_title_var, 
+                              font=('Segoe UI', 10), relief=tk.FLAT, bd=5,
+                              bg='white', fg=self.colors['dark'])
+        title_entry.pack(fill=tk.X, pady=(5,0), ipady=8)
         
-        # Description Template
-        tk.Label(details_frame, text="📄 Description Template:", font=('Segoe UI', 10, 'bold'),
-                bg=self.colors['background'], fg=self.colors['dark']).pack(anchor=tk.W, pady=(0,5))
+        # Description Template with better text area
+        desc_frame = self.create_config_field_frame(details_section)
+        self.create_config_label(desc_frame, "📄 Description Template", 
+                                "Default description for your videos")
         
-        desc_frame = tk.Frame(details_frame, bg=self.colors['background'])
-        desc_frame.pack(fill=tk.X, pady=(0,10))
+        desc_text_frame = tk.Frame(desc_frame, bg=self.colors['surface'], relief=tk.FLAT, bd=1)
+        desc_text_frame.pack(fill=tk.X, pady=(5,0))
         
-        self.config_desc_text = tk.Text(desc_frame, height=8, width=80, font=('Segoe UI', 10),
-                                       bg='white', fg=self.colors['dark'], wrap=tk.WORD)
-        desc_scroll = ttk.Scrollbar(desc_frame, orient="vertical", command=self.config_desc_text.yview)
+        self.config_desc_text = tk.Text(desc_text_frame, height=6, font=('Segoe UI', 10),
+                                       bg='white', fg=self.colors['dark'], wrap=tk.WORD,
+                                       relief=tk.FLAT, bd=5)
+        desc_scroll = ttk.Scrollbar(desc_text_frame, orient="vertical", command=self.config_desc_text.yview)
         self.config_desc_text.configure(yscrollcommand=desc_scroll.set)
         
-        self.config_desc_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        desc_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.config_desc_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        desc_scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(0,5), pady=5)
         self.config_desc_text.insert('1.0', self.upload_settings.get('description', ''))
         
-        # Tags
-        tk.Label(details_frame, text="🏷️ Default Tags (comma-separated):", font=('Segoe UI', 10, 'bold'),
-                bg=self.colors['background'], fg=self.colors['dark']).pack(anchor=tk.W, pady=(0,5))
+        # Tags with modern input
+        tags_frame = self.create_config_field_frame(details_section)
+        self.create_config_label(tags_frame, "🏷️ Default Tags", 
+                                "Comma-separated tags (e.g., gaming, tutorial, review)")
         self.config_tags_var = tk.StringVar(value=self.upload_settings.get('tags', ''))
-        tags_entry = tk.Entry(details_frame, textvariable=self.config_tags_var, width=80,
-                             bg='white', fg=self.colors['dark'], font=('Segoe UI', 10))
-        tags_entry.pack(fill=tk.X, pady=(0,5))
-        tk.Label(details_frame, text="💡 Example: gaming, tutorial, review, tech",
-                font=('Segoe UI', 9), bg=self.colors['background'], fg=self.colors['medium']).pack(anchor=tk.W, pady=(0,10))
+        tags_entry = tk.Entry(tags_frame, textvariable=self.config_tags_var, 
+                             font=('Segoe UI', 10), relief=tk.FLAT, bd=5,
+                             bg='white', fg=self.colors['dark'])
+        tags_entry.pack(fill=tk.X, pady=(5,0), ipady=8)
         
-        # === VISIBILITY & AUDIENCE SECTION ===
-        visibility_frame = tk.LabelFrame(scrollable_frame, text="👁️ Visibility & Audience", 
-                                       bg=self.colors['background'], fg=self.colors['primary'],
-                                       font=('Segoe UI', 11, 'bold'), padx=15, pady=15)
-        visibility_frame.pack(fill=tk.X, pady=(0,15))
+        # === SECTION 2: PRIVACY & AUDIENCE ===
+        privacy_section = self.create_config_section(scrollable_frame, "� Privacy & Audience", 
+                                                    "Control who can see and interact with your videos")
         
-        # Privacy & Kids settings
-        privacy_grid = tk.Frame(visibility_frame, bg=self.colors['background'])
-        privacy_grid.pack(fill=tk.X, pady=(0,10))
+        # Privacy and Kids settings in a nice grid
+        privacy_grid = tk.Frame(privacy_section, bg=self.colors['surface'])
+        privacy_grid.pack(fill=tk.X, pady=10)
         
-        tk.Label(privacy_grid, text="🔒 Privacy:", font=('Segoe UI', 10, 'bold'),
-                bg=self.colors['background'], fg=self.colors['dark']).grid(row=0, column=0, sticky=tk.W, padx=(0,10))
+        # Privacy setting
+        privacy_frame = tk.Frame(privacy_grid, bg=self.colors['surface'])
+        privacy_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10, pady=15)
+        
+        tk.Label(privacy_frame, text="🔒 Visibility", font=('Segoe UI', 10, 'bold'),
+                bg=self.colors['surface'], fg=self.colors['dark']).pack(anchor=tk.W)
         self.config_privacy_var = tk.StringVar(value=self.upload_settings.get('privacy', 'public'))
-        privacy_combo = ttk.Combobox(privacy_grid, textvariable=self.config_privacy_var,
-                                   values=["public", "unlisted", "private"], state="readonly", width=15)
-        privacy_combo.grid(row=0, column=1, padx=(0,30), sticky=tk.W)
+        privacy_combo = ttk.Combobox(privacy_frame, textvariable=self.config_privacy_var,
+                                   values=["public", "unlisted", "private"], state="readonly", 
+                                   font=('Segoe UI', 10), width=15)
+        privacy_combo.pack(anchor=tk.W, pady=(5,0))
         
-        tk.Label(privacy_grid, text="👶 Made for Kids:", font=('Segoe UI', 10, 'bold'),
-                bg=self.colors['background'], fg=self.colors['dark']).grid(row=0, column=2, sticky=tk.W, padx=(0,10))
+        # Made for Kids setting
+        kids_frame = tk.Frame(privacy_grid, bg=self.colors['surface'])
+        kids_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10, pady=15)
+        
+        tk.Label(kids_frame, text="👶 Audience", font=('Segoe UI', 10, 'bold'),
+                bg=self.colors['surface'], fg=self.colors['dark']).pack(anchor=tk.W)
         self.config_kids_var = tk.StringVar(value=self.upload_settings.get('made_for_kids', 'no'))
-        kids_combo = ttk.Combobox(privacy_grid, textvariable=self.config_kids_var,
-                                values=["no", "yes"], state="readonly", width=10)
-        kids_combo.grid(row=0, column=3, sticky=tk.W)
+        kids_combo = ttk.Combobox(kids_frame, textvariable=self.config_kids_var,
+                                values=[("no", "General Audience"), ("yes", "Made for Kids")], 
+                                state="readonly", font=('Segoe UI', 10), width=15)
+        kids_combo.pack(anchor=tk.W, pady=(5,0))
         
         # Age restriction
-        age_frame = tk.Frame(visibility_frame, bg=self.colors['background'])
-        age_frame.pack(fill=tk.X, pady=(0,10))
+        age_frame = tk.Frame(privacy_grid, bg=self.colors['surface'])
+        age_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10, pady=15)
         
-        tk.Label(age_frame, text="🔞 Age Restriction:", font=('Segoe UI', 10, 'bold'),
-                bg=self.colors['background'], fg=self.colors['dark']).pack(side=tk.LEFT, padx=(0,10))
+        tk.Label(age_frame, text="🔞 Age Restriction", font=('Segoe UI', 10, 'bold'),
+                bg=self.colors['surface'], fg=self.colors['dark']).pack(anchor=tk.W)
         self.config_age_restriction_var = tk.StringVar(value=self.upload_settings.get('age_restriction', 'none'))
         age_combo = ttk.Combobox(age_frame, textvariable=self.config_age_restriction_var,
-                               values=["none", "18+"], state="readonly", width=15)
-        age_combo.pack(side=tk.LEFT)
+                               values=["none", "18+"], state="readonly", 
+                               font=('Segoe UI', 10), width=15)
+        age_combo.pack(anchor=tk.W, pady=(5,0))
         
-        # === MONETIZATION & FEATURES SECTION ===
-        features_frame = tk.LabelFrame(scrollable_frame, text="💰 Monetization & Features", 
-                                     bg=self.colors['background'], fg=self.colors['primary'],
-                                     font=('Segoe UI', 11, 'bold'), padx=15, pady=15)
-        features_frame.pack(fill=tk.X, pady=(0,15))
+        # === SECTION 3: CONTENT CLASSIFICATION ===
+        content_section = self.create_config_section(scrollable_frame, "� Content Classification", 
+                                                    "Categorize your content for better discoverability")
+        
+        # Category and Language in grid
+        classification_grid = tk.Frame(content_section, bg=self.colors['surface'])
+        classification_grid.pack(fill=tk.X, pady=10)
         
         # Category
-        category_frame = tk.Frame(features_frame, bg=self.colors['background'])
-        category_frame.pack(fill=tk.X, pady=(0,10))
+        cat_frame = tk.Frame(classification_grid, bg=self.colors['surface'])
+        cat_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10, pady=15)
         
-        tk.Label(category_frame, text="📂 Category:", font=('Segoe UI', 10, 'bold'),
-                bg=self.colors['background'], fg=self.colors['dark']).pack(side=tk.LEFT, padx=(0,10))
+        tk.Label(cat_frame, text="📂 Category", font=('Segoe UI', 10, 'bold'),
+                bg=self.colors['surface'], fg=self.colors['dark']).pack(anchor=tk.W)
         self.config_category_var = tk.StringVar(value=self.upload_settings.get('category', 'Entertainment'))
-        category_combo = ttk.Combobox(category_frame, textvariable=self.config_category_var,
+        category_combo = ttk.Combobox(cat_frame, textvariable=self.config_category_var,
                                     values=["Entertainment", "Gaming", "Education", "Science & Technology", 
                                            "Music", "Sports", "News & Politics", "Comedy", "Film & Animation",
                                            "Autos & Vehicles", "Travel & Events", "Pets & Animals", "Howto & Style"],
-                                    state="readonly", width=25)
-        category_combo.pack(side=tk.LEFT)
+                                    state="readonly", font=('Segoe UI', 10), width=20)
+        category_combo.pack(anchor=tk.W, pady=(5,0))
         
         # Language
-        language_frame = tk.Frame(features_frame, bg=self.colors['background'])
-        language_frame.pack(fill=tk.X, pady=(0,10))
+        lang_frame = tk.Frame(classification_grid, bg=self.colors['surface'])
+        lang_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10, pady=15)
         
-        tk.Label(language_frame, text="🌐 Language:", font=('Segoe UI', 10, 'bold'),
-                bg=self.colors['background'], fg=self.colors['dark']).pack(side=tk.LEFT, padx=(0,10))
+        tk.Label(lang_frame, text="🌐 Language", font=('Segoe UI', 10, 'bold'),
+                bg=self.colors['surface'], fg=self.colors['dark']).pack(anchor=tk.W)
         self.config_language_var = tk.StringVar(value=self.upload_settings.get('language', 'English'))
-        language_combo = ttk.Combobox(language_frame, textvariable=self.config_language_var,
-                                    values=["English", "Vietnamese", "Chinese", "Japanese", "Korean", "Spanish", "French", "German"],
-                                    state="readonly", width=20)
-        language_combo.pack(side=tk.LEFT)
+        language_combo = ttk.Combobox(lang_frame, textvariable=self.config_language_var,
+                                    values=["English", "Vietnamese", "Chinese", "Japanese", "Korean", 
+                                           "Spanish", "French", "German", "Portuguese", "Russian"],
+                                    state="readonly", font=('Segoe UI', 10), width=15)
+        language_combo.pack(anchor=tk.W, pady=(5,0))
         
         # License
-        license_frame = tk.Frame(features_frame, bg=self.colors['background'])
-        license_frame.pack(fill=tk.X, pady=(0,10))
-        
-        tk.Label(license_frame, text="⚖️ License:", font=('Segoe UI', 10, 'bold'),
-                bg=self.colors['background'], fg=self.colors['dark']).pack(side=tk.LEFT, padx=(0,10))
+        license_frame = self.create_config_field_frame(content_section)
+        self.create_config_label(license_frame, "⚖️ License", "Rights and usage permissions")
         self.config_license_var = tk.StringVar(value=self.upload_settings.get('license', 'Standard YouTube License'))
         license_combo = ttk.Combobox(license_frame, textvariable=self.config_license_var,
                                    values=["Standard YouTube License", "Creative Commons - Attribution"],
-                                   state="readonly", width=30)
-        license_combo.pack(side=tk.LEFT)
+                                   state="readonly", font=('Segoe UI', 10), width=35)
+        license_combo.pack(anchor=tk.W, pady=(5,0))
         
-        # Checkboxes for additional features
-        features_checkboxes = tk.Frame(features_frame, bg=self.colors['background'])
-        features_checkboxes.pack(fill=tk.X, pady=(10,0))
+        # === SECTION 4: INTERACTION SETTINGS ===
+        interaction_section = self.create_config_section(scrollable_frame, "💬 Interaction Settings", 
+                                                        "Configure how viewers can interact with your videos")
+        
+        # Modern checkboxes in a nice grid
+        interaction_grid = tk.Frame(interaction_section, bg=self.colors['surface'])
+        interaction_grid.pack(fill=tk.X, pady=10)
+        
+        # Left column
+        left_col = tk.Frame(interaction_grid, bg=self.colors['surface'])
+        left_col.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=20, pady=15)
         
         self.config_comments_var = tk.BooleanVar(value=self.upload_settings.get('allow_comments', True))
-        tk.Checkbutton(features_checkboxes, text="💬 Allow Comments", variable=self.config_comments_var,
-                      bg=self.colors['background'], fg=self.colors['dark'], font=('Segoe UI', 10),
-                      selectcolor='white').pack(anchor=tk.W)
+        comments_cb = tk.Checkbutton(left_col, text="💬 Allow Comments", variable=self.config_comments_var,
+                                   bg=self.colors['surface'], fg=self.colors['dark'], 
+                                   font=('Segoe UI', 10), selectcolor='white', bd=0)
+        comments_cb.pack(anchor=tk.W, pady=5)
         
         self.config_ratings_var = tk.BooleanVar(value=self.upload_settings.get('allow_ratings', True))
-        tk.Checkbutton(features_checkboxes, text="⭐ Allow Ratings", variable=self.config_ratings_var,
-                      bg=self.colors['background'], fg=self.colors['dark'], font=('Segoe UI', 10),
-                      selectcolor='white').pack(anchor=tk.W)
+        ratings_cb = tk.Checkbutton(left_col, text="⭐ Allow Ratings", variable=self.config_ratings_var,
+                                  bg=self.colors['surface'], fg=self.colors['dark'], 
+                                  font=('Segoe UI', 10), selectcolor='white', bd=0)
+        ratings_cb.pack(anchor=tk.W, pady=5)
+        
+        # Right column
+        right_col = tk.Frame(interaction_grid, bg=self.colors['surface'])
+        right_col.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=20, pady=15)
         
         self.config_embedding_var = tk.BooleanVar(value=self.upload_settings.get('allow_embedding', True))
-        tk.Checkbutton(features_checkboxes, text="🔗 Allow Embedding", variable=self.config_embedding_var,
-                      bg=self.colors['background'], fg=self.colors['dark'], font=('Segoe UI', 10),
-                      selectcolor='white').pack(anchor=tk.W)
+        embedding_cb = tk.Checkbutton(right_col, text="🔗 Allow Embedding", variable=self.config_embedding_var,
+                                    bg=self.colors['surface'], fg=self.colors['dark'], 
+                                    font=('Segoe UI', 10), selectcolor='white', bd=0)
+        embedding_cb.pack(anchor=tk.W, pady=5)
         
         self.config_notify_var = tk.BooleanVar(value=self.upload_settings.get('notify_subscribers', True))
-        tk.Checkbutton(features_checkboxes, text="🔔 Notify Subscribers", variable=self.config_notify_var,
-                      bg=self.colors['background'], fg=self.colors['dark'], font=('Segoe UI', 10),
-                      selectcolor='white').pack(anchor=tk.W)
+        notify_cb = tk.Checkbutton(right_col, text="🔔 Notify Subscribers", variable=self.config_notify_var,
+                                 bg=self.colors['surface'], fg=self.colors['dark'], 
+                                 font=('Segoe UI', 10), selectcolor='white', bd=0)
+        notify_cb.pack(anchor=tk.W, pady=5)
         
-        # === SCHEDULING SECTION ===
-        schedule_frame = tk.LabelFrame(scrollable_frame, text="📅 Publishing Schedule", 
-                                     bg=self.colors['background'], fg=self.colors['primary'],
-                                     font=('Segoe UI', 11, 'bold'), padx=15, pady=15)
-        schedule_frame.pack(fill=tk.X, pady=(0,15))
+        # === SECTION 5: PUBLISHING & THUMBNAIL ===
+        publishing_section = self.create_config_section(scrollable_frame, "📅 Publishing & Thumbnail", 
+                                                       "Control when and how your videos are published")
         
-        # Publish timing
-        publish_frame = tk.Frame(schedule_frame, bg=self.colors['background'])
-        publish_frame.pack(fill=tk.X, pady=(0,10))
-        
-        tk.Label(publish_frame, text="⏰ Publish:", font=('Segoe UI', 10, 'bold'),
-                bg=self.colors['background'], fg=self.colors['dark']).pack(side=tk.LEFT, padx=(0,10))
+        # Publishing timing
+        publish_frame = self.create_config_field_frame(publishing_section)
+        self.create_config_label(publish_frame, "⏰ Publishing", "When to make your video live")
         self.config_publish_var = tk.StringVar(value=self.upload_settings.get('publish_timing', 'immediately'))
         publish_combo = ttk.Combobox(publish_frame, textvariable=self.config_publish_var,
-                                   values=["immediately", "scheduled"], state="readonly", width=15)
-        publish_combo.pack(side=tk.LEFT)
+                                   values=["immediately", "scheduled"], state="readonly", 
+                                   font=('Segoe UI', 10), width=20)
+        publish_combo.pack(anchor=tk.W, pady=(5,0))
         
-        # === THUMBNAIL SECTION ===
-        thumbnail_frame = tk.LabelFrame(scrollable_frame, text="🖼️ Thumbnail Settings", 
-                                      bg=self.colors['background'], fg=self.colors['primary'],
-                                      font=('Segoe UI', 11, 'bold'), padx=15, pady=15)
-        thumbnail_frame.pack(fill=tk.X, pady=(0,15))
+        # Thumbnail settings
+        thumbnail_container = tk.Frame(publishing_section, bg=self.colors['surface'], relief=tk.FLAT, bd=1)
+        thumbnail_container.pack(fill=tk.X, pady=(10,0))
+        
+        thumb_header = tk.Frame(thumbnail_container, bg=self.colors['surface'])
+        thumb_header.pack(fill=tk.X, padx=15, pady=(15,10))
+        
+        tk.Label(thumb_header, text="🖼️ Thumbnail Settings", font=('Segoe UI', 11, 'bold'),
+                bg=self.colors['surface'], fg=self.colors['primary']).pack(side=tk.LEFT)
         
         self.config_auto_thumb_var = tk.BooleanVar(value=self.upload_settings.get('auto_thumbnail', True))
-        tk.Checkbutton(thumbnail_frame, text="🤖 Use Auto-Generated Thumbnail", 
-                      variable=self.config_auto_thumb_var,
-                      bg=self.colors['background'], fg=self.colors['dark'], font=('Segoe UI', 10),
-                      selectcolor='white').pack(anchor=tk.W)
+        auto_thumb_cb = tk.Checkbutton(thumbnail_container, text="🤖 Use Auto-Generated Thumbnail", 
+                                     variable=self.config_auto_thumb_var,
+                                     bg=self.colors['surface'], fg=self.colors['dark'], 
+                                     font=('Segoe UI', 10), selectcolor='white', bd=0)
+        auto_thumb_cb.pack(anchor=tk.W, padx=15, pady=5)
         
-        # Custom thumbnail path
-        thumb_path_frame = tk.Frame(thumbnail_frame, bg=self.colors['background'])
-        thumb_path_frame.pack(fill=tk.X, pady=(5,0))
+        # Custom thumbnail path with modern styling
+        thumb_path_container = tk.Frame(thumbnail_container, bg=self.colors['surface'])
+        thumb_path_container.pack(fill=tk.X, padx=15, pady=(5,15))
         
-        tk.Label(thumb_path_frame, text="📁 Custom Thumbnail Path:", font=('Segoe UI', 10),
-                bg=self.colors['background'], fg=self.colors['dark']).pack(anchor=tk.W, pady=(0,5))
+        tk.Label(thumb_path_container, text="📁 Custom Thumbnail:", font=('Segoe UI', 10),
+                bg=self.colors['surface'], fg=self.colors['dark']).pack(anchor=tk.W, pady=(0,5))
+        
+        thumb_input_frame = tk.Frame(thumb_path_container, bg=self.colors['surface'])
+        thumb_input_frame.pack(fill=tk.X)
+        
         self.config_thumb_path_var = tk.StringVar(value=self.upload_settings.get('thumbnail_path', ''))
-        thumb_entry = tk.Entry(thumb_path_frame, textvariable=self.config_thumb_path_var, width=60,
-                              bg='white', fg=self.colors['dark'], font=('Segoe UI', 10))
-        thumb_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,10))
+        thumb_entry = tk.Entry(thumb_input_frame, textvariable=self.config_thumb_path_var, 
+                              font=('Segoe UI', 10), relief=tk.FLAT, bd=5,
+                              bg='white', fg=self.colors['dark'])
+        thumb_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,10), ipady=6)
         
-        tk.Button(thumb_path_frame, text="📁 Browse",
-                 command=lambda: self.browse_thumbnail_path(),
-                 bg=self.colors['primary'], fg='white', relief=tk.FLAT,
-                 font=('Segoe UI', 9, 'bold'), cursor='hand2', padx=15, pady=5).pack(side=tk.RIGHT)
+        browse_btn = tk.Button(thumb_input_frame, text="📁 Browse",
+                              command=lambda: self.browse_thumbnail_path(),
+                              bg=self.colors['secondary'], fg='white', relief=tk.FLAT,
+                              font=('Segoe UI', 9, 'bold'), cursor='hand2', padx=15, pady=6)
+        browse_btn.pack(side=tk.RIGHT)
         
-        # === BUTTONS SECTION ===
-        button_frame = tk.Frame(scrollable_frame, bg=self.colors['background'])
-        button_frame.pack(fill=tk.X, pady=(20,0))
+        # === BOTTOM BUTTONS WITH MODERN STYLING ===
+        button_container = tk.Frame(config_window, bg=self.colors['light'], height=80)
+        button_container.pack(fill=tk.X, side=tk.BOTTOM)
+        button_container.pack_propagate(False)
         
-        # Reset to defaults
-        tk.Button(button_frame, text="🔄 Reset to Defaults",
-                 command=lambda: self.reset_config_defaults(config_window),
-                 bg=self.colors['warning'], fg='white', relief=tk.FLAT,
-                 font=('Segoe UI', 10, 'bold'), cursor='hand2', padx=20, pady=8).pack(side=tk.LEFT)
+        button_frame = tk.Frame(button_container, bg=self.colors['light'])
+        button_frame.pack(expand=True)
         
-        # Cancel and Save buttons
-        tk.Button(button_frame, text="❌ Cancel",
-                 command=config_window.destroy,
-                 bg=self.colors['danger'], fg='white', relief=tk.FLAT,
-                 font=('Segoe UI', 10, 'bold'), cursor='hand2', padx=20, pady=8).pack(side=tk.RIGHT, padx=(10,0))
+        # Reset button
+        reset_btn = tk.Button(button_frame, text="🔄 Reset to Defaults",
+                             command=lambda: self.reset_config_defaults(config_window),
+                             bg=self.colors['warning'], fg='white', relief=tk.FLAT,
+                             font=('Segoe UI', 11, 'bold'), cursor='hand2', 
+                             padx=25, pady=12, bd=0)
+        reset_btn.pack(side=tk.LEFT, padx=10)
         
-        tk.Button(button_frame, text="✅ Save & Apply",
-                 command=lambda: self.save_config_settings(config_window),
-                 bg=self.colors['success'], fg='white', relief=tk.FLAT,
-                 font=('Segoe UI', 10, 'bold'), cursor='hand2', padx=20, pady=8).pack(side=tk.RIGHT)
+        # Cancel button
+        cancel_btn = tk.Button(button_frame, text="❌ Cancel",
+                              command=config_window.destroy,
+                              bg=self.colors['danger'], fg='white', relief=tk.FLAT,
+                              font=('Segoe UI', 11, 'bold'), cursor='hand2', 
+                              padx=25, pady=12, bd=0)
+        cancel_btn.pack(side=tk.RIGHT, padx=10)
+        
+        # Save button
+        save_btn = tk.Button(button_frame, text="✅ Save Configuration",
+                            command=lambda: self.save_config_settings(config_window),
+                            bg=self.colors['success'], fg='white', relief=tk.FLAT,
+                            font=('Segoe UI', 11, 'bold'), cursor='hand2', 
+                            padx=25, pady=12, bd=0)
+        save_btn.pack(side=tk.RIGHT, padx=(10,0))
+
+    def create_config_section(self, parent, title, description):
+        """Create a styled section for configuration form"""
+        section_frame = tk.Frame(parent, bg=self.colors['background'])
+        section_frame.pack(fill=tk.X, pady=(0,20))
+        
+        # Section header
+        header_frame = tk.Frame(section_frame, bg=self.colors['primary'], height=50)
+        header_frame.pack(fill=tk.X)
+        header_frame.pack_propagate(False)
+        
+        header_content = tk.Frame(header_frame, bg=self.colors['primary'])
+        header_content.pack(expand=True, fill=tk.X, padx=20)
+        
+        tk.Label(header_content, text=title, font=('Segoe UI', 12, 'bold'),
+                bg=self.colors['primary'], fg='white').pack(side=tk.LEFT, anchor=tk.W, pady=15)
+        
+        # Section content area
+        content_frame = tk.Frame(section_frame, bg=self.colors['surface'], relief=tk.FLAT, bd=1)
+        content_frame.pack(fill=tk.X, padx=1)
+        
+        # Description
+        if description:
+            desc_frame = tk.Frame(content_frame, bg=self.colors['light'])
+            desc_frame.pack(fill=tk.X, padx=20, pady=(15,10))
+            
+            tk.Label(desc_frame, text=description, font=('Segoe UI', 9),
+                    bg=self.colors['light'], fg=self.colors['medium']).pack(anchor=tk.W)
+        
+        return content_frame
+    
+    def create_config_field_frame(self, parent):
+        """Create a frame for configuration fields"""
+        field_frame = tk.Frame(parent, bg=self.colors['surface'])
+        field_frame.pack(fill=tk.X, padx=20, pady=10)
+        return field_frame
+    
+    def create_config_label(self, parent, text, description=None):
+        """Create a styled label for configuration fields"""
+        label = tk.Label(parent, text=text, font=('Segoe UI', 10, 'bold'),
+                        bg=self.colors['surface'], fg=self.colors['dark'])
+        label.pack(anchor=tk.W, pady=(0,5))
+        
+        if description:
+            desc_label = tk.Label(parent, text=description, font=('Segoe UI', 9),
+                                 bg=self.colors['surface'], fg=self.colors['medium'])
+            desc_label.pack(anchor=tk.W, pady=(0,5))
+        
+        return label
 
     def browse_thumbnail_path(self):
         """Browse for thumbnail image file"""
