@@ -559,6 +559,7 @@ class DouyinYouTubeTool:
                 success = self.youtube_uploader.authenticate()
                 if success:
                     self.log("✅ OAuth authentication successful! Full YouTube access enabled.")
+                    self.update_auth_status()  # Update UI status
                     return True
                 else:
                     self.log("❌ OAuth authentication failed!")
@@ -589,6 +590,7 @@ class DouyinYouTubeTool:
                     success = self.youtube_uploader.authenticate_with_api_key(api_key.strip())
                     if success:
                         self.log("✅ API key authentication successful! (Read-only access)")
+                        self.update_auth_status()  # Update UI status
                         return True
                     else:
                         self.log("❌ API key authentication failed!")
@@ -603,6 +605,7 @@ class DouyinYouTubeTool:
                 self.youtube_uploader.service = 'demo_service'
                 self.youtube_uploader.youtube = 'demo_service'
                 self.youtube_uploader.authenticated = True
+                self.update_auth_status()  # Update UI status
                 return True
                 
         except Exception as e:
@@ -1127,7 +1130,11 @@ class DouyinYouTubeTool:
                                           font=('Segoe UI', 9, 'bold'), cursor='hand2')
         self.youtube_auth_btn.pack(side=tk.LEFT, padx=(0, 15))
         
-        self.auth_status = ttk.Label(auth_controls, text="🔴 Not authenticated", 
+        # Authentication status (use StringVar for dynamic updates)
+        if not hasattr(self, 'auth_status_var') or not self.auth_status_var:
+            self.auth_status_var = tk.StringVar(value="🔴 Not authenticated")
+        
+        self.auth_status = ttk.Label(auth_controls, textvariable=self.auth_status_var, 
                                     font=('Segoe UI', 10), foreground='#e74c3c')
         self.auth_status.pack(side=tk.LEFT)
 
