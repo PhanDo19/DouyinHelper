@@ -484,17 +484,25 @@ class DouyinYouTubeTool:
         if YOUTUBE_AVAILABLE:
             self.youtube_uploader = self.init_youtube_uploader()
         
-        # Initialize upload settings
+        # Initialize comprehensive upload settings
         self.upload_settings = {
             'title_template': "[FILENAME] - Amazing Douyin Video! 🔥",
             'description': "🎬 Amazing content from Douyin!\n\nFollow for more amazing videos!\nLike and Subscribe if you enjoyed!\n\n#Douyin #Viral #Entertainment #Shorts",
+            'tags': 'douyin,viral,entertainment,funny,trending,shorts',
             'privacy': 'public',
+            'made_for_kids': 'no',
+            'age_restriction': 'none',
             'category': 'Entertainment', 
             'language': 'English',
-            'tags': 'douyin,viral,entertainment,funny,trending,shorts',
-            'made_for_kids': 'no',
-            'shorts_mode': True,
+            'license': 'Standard YouTube License',
+            'allow_comments': True,
+            'allow_ratings': True,
+            'allow_embedding': True,
+            'notify_subscribers': True,
+            'publish_timing': 'immediately',
             'auto_thumbnail': True,
+            'thumbnail_path': '',
+            'shorts_mode': True,
             'quality': 'hd720',
             'monetize_enabled': False,
             'audience_type': 'general',
@@ -3933,10 +3941,10 @@ class DouyinYouTubeTool:
             self.stat_labels[title].config(text=str(value))
 
     def open_upload_config(self):
-        """Open upload configuration popup window"""
+        """Open comprehensive upload configuration popup window"""
         config_window = tk.Toplevel(self.root)
-        config_window.title("⚙️ Upload Configuration")
-        config_window.geometry("600x500")
+        config_window.title("⚙️ YouTube Upload Configuration")
+        config_window.geometry("800x700")
         config_window.resizable(True, True)
         config_window.transient(self.root)
         config_window.grab_set()
@@ -3944,76 +3952,338 @@ class DouyinYouTubeTool:
         # Configure colors
         config_window.configure(bg=self.colors['light'])
         
-        main_frame = tk.Frame(config_window, bg=self.colors['light'])
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        # Create scrollable frame
+        main_canvas = tk.Canvas(config_window, bg=self.colors['light'])
+        scrollbar = ttk.Scrollbar(config_window, orient="vertical", command=main_canvas.yview)
+        scrollable_frame = tk.Frame(main_canvas, bg=self.colors['light'])
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: main_canvas.configure(scrollregion=main_canvas.bbox("all"))
+        )
+        
+        main_canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        main_canvas.configure(yscrollcommand=scrollbar.set)
+        
+        main_canvas.pack(side="left", fill="both", expand=True, padx=15, pady=15)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Bind mousewheel
+        def _on_mousewheel(event):
+            main_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        main_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        
+        # === BASIC DETAILS SECTION ===
+        details_frame = tk.LabelFrame(scrollable_frame, text="📝 Basic Details", 
+                                    bg=self.colors['background'], fg=self.colors['primary'],
+                                    font=('Segoe UI', 11, 'bold'), padx=15, pady=15)
+        details_frame.pack(fill=tk.X, pady=(0,15))
         
         # Title Template
-        tk.Label(main_frame, text="📝 Title Template:", font=('Segoe UI', 11, 'bold'),
-                bg=self.colors['light'], fg=self.colors['dark']).pack(anchor=tk.W, pady=(0,5))
-        self.config_title_var = tk.StringVar(value=self.upload_settings['title_template'])
-        title_entry = tk.Entry(main_frame, textvariable=self.config_title_var, width=60,
+        tk.Label(details_frame, text="🎬 Title Template:", font=('Segoe UI', 10, 'bold'),
+                bg=self.colors['background'], fg=self.colors['dark']).pack(anchor=tk.W, pady=(0,5))
+        self.config_title_var = tk.StringVar(value=self.upload_settings.get('title_template', '[FILENAME]'))
+        title_entry = tk.Entry(details_frame, textvariable=self.config_title_var, width=80,
                               bg='white', fg=self.colors['dark'], font=('Segoe UI', 10))
-        title_entry.pack(fill=tk.X, pady=(0,10))
-        
-        tk.Label(main_frame, text="💡 Use [FILENAME] as placeholder for video filename",
-                font=('Segoe UI', 9), bg=self.colors['light'], fg=self.colors['medium']).pack(anchor=tk.W, pady=(0,15))
+        title_entry.pack(fill=tk.X, pady=(0,5))
+        tk.Label(details_frame, text="💡 Use [FILENAME] as placeholder for video filename",
+                font=('Segoe UI', 9), bg=self.colors['background'], fg=self.colors['medium']).pack(anchor=tk.W, pady=(0,10))
         
         # Description Template
-        tk.Label(main_frame, text="📄 Description Template:", font=('Segoe UI', 11, 'bold'),
-                bg=self.colors['light'], fg=self.colors['dark']).pack(anchor=tk.W, pady=(0,5))
+        tk.Label(details_frame, text="📄 Description Template:", font=('Segoe UI', 10, 'bold'),
+                bg=self.colors['background'], fg=self.colors['dark']).pack(anchor=tk.W, pady=(0,5))
         
-        self.config_desc_text = tk.Text(main_frame, height=6, width=60, font=('Segoe UI', 10),
+        desc_frame = tk.Frame(details_frame, bg=self.colors['background'])
+        desc_frame.pack(fill=tk.X, pady=(0,10))
+        
+        self.config_desc_text = tk.Text(desc_frame, height=8, width=80, font=('Segoe UI', 10),
                                        bg='white', fg=self.colors['dark'], wrap=tk.WORD)
-        self.config_desc_text.pack(fill=tk.X, pady=(0,15))
-        self.config_desc_text.insert('1.0', self.upload_settings['description'])
+        desc_scroll = ttk.Scrollbar(desc_frame, orient="vertical", command=self.config_desc_text.yview)
+        self.config_desc_text.configure(yscrollcommand=desc_scroll.set)
         
-        # Privacy & Settings
-        settings_frame = tk.Frame(main_frame, bg=self.colors['light'])
-        settings_frame.pack(fill=tk.X, pady=(0,15))
+        self.config_desc_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        desc_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.config_desc_text.insert('1.0', self.upload_settings.get('description', ''))
         
-        tk.Label(settings_frame, text="🔒 Privacy:", font=('Segoe UI', 10, 'bold'),
-                bg=self.colors['light'], fg=self.colors['dark']).grid(row=0, column=0, sticky=tk.W, padx=(0,10))
-        self.config_privacy_var = tk.StringVar(value=self.upload_settings['privacy'])
-        privacy_combo = ttk.Combobox(settings_frame, textvariable=self.config_privacy_var,
-                                   values=["public", "unlisted", "private"], state="readonly", width=12)
-        privacy_combo.grid(row=0, column=1, padx=(0,20))
+        # Tags
+        tk.Label(details_frame, text="🏷️ Default Tags (comma-separated):", font=('Segoe UI', 10, 'bold'),
+                bg=self.colors['background'], fg=self.colors['dark']).pack(anchor=tk.W, pady=(0,5))
+        self.config_tags_var = tk.StringVar(value=self.upload_settings.get('tags', ''))
+        tags_entry = tk.Entry(details_frame, textvariable=self.config_tags_var, width=80,
+                             bg='white', fg=self.colors['dark'], font=('Segoe UI', 10))
+        tags_entry.pack(fill=tk.X, pady=(0,5))
+        tk.Label(details_frame, text="💡 Example: gaming, tutorial, review, tech",
+                font=('Segoe UI', 9), bg=self.colors['background'], fg=self.colors['medium']).pack(anchor=tk.W, pady=(0,10))
         
-        tk.Label(settings_frame, text="👶 Made for Kids:", font=('Segoe UI', 10, 'bold'),
-                bg=self.colors['light'], fg=self.colors['dark']).grid(row=0, column=2, sticky=tk.W, padx=(0,10))
-        self.config_kids_var = tk.StringVar(value=self.upload_settings['made_for_kids'])
-        kids_combo = ttk.Combobox(settings_frame, textvariable=self.config_kids_var,
-                                values=["no", "yes"], state="readonly", width=8)
-        kids_combo.grid(row=0, column=3)
+        # === VISIBILITY & AUDIENCE SECTION ===
+        visibility_frame = tk.LabelFrame(scrollable_frame, text="👁️ Visibility & Audience", 
+                                       bg=self.colors['background'], fg=self.colors['primary'],
+                                       font=('Segoe UI', 11, 'bold'), padx=15, pady=15)
+        visibility_frame.pack(fill=tk.X, pady=(0,15))
         
-        # Buttons
-        button_frame = tk.Frame(main_frame, bg=self.colors['light'])
+        # Privacy & Kids settings
+        privacy_grid = tk.Frame(visibility_frame, bg=self.colors['background'])
+        privacy_grid.pack(fill=tk.X, pady=(0,10))
+        
+        tk.Label(privacy_grid, text="🔒 Privacy:", font=('Segoe UI', 10, 'bold'),
+                bg=self.colors['background'], fg=self.colors['dark']).grid(row=0, column=0, sticky=tk.W, padx=(0,10))
+        self.config_privacy_var = tk.StringVar(value=self.upload_settings.get('privacy', 'public'))
+        privacy_combo = ttk.Combobox(privacy_grid, textvariable=self.config_privacy_var,
+                                   values=["public", "unlisted", "private"], state="readonly", width=15)
+        privacy_combo.grid(row=0, column=1, padx=(0,30), sticky=tk.W)
+        
+        tk.Label(privacy_grid, text="👶 Made for Kids:", font=('Segoe UI', 10, 'bold'),
+                bg=self.colors['background'], fg=self.colors['dark']).grid(row=0, column=2, sticky=tk.W, padx=(0,10))
+        self.config_kids_var = tk.StringVar(value=self.upload_settings.get('made_for_kids', 'no'))
+        kids_combo = ttk.Combobox(privacy_grid, textvariable=self.config_kids_var,
+                                values=["no", "yes"], state="readonly", width=10)
+        kids_combo.grid(row=0, column=3, sticky=tk.W)
+        
+        # Age restriction
+        age_frame = tk.Frame(visibility_frame, bg=self.colors['background'])
+        age_frame.pack(fill=tk.X, pady=(0,10))
+        
+        tk.Label(age_frame, text="🔞 Age Restriction:", font=('Segoe UI', 10, 'bold'),
+                bg=self.colors['background'], fg=self.colors['dark']).pack(side=tk.LEFT, padx=(0,10))
+        self.config_age_restriction_var = tk.StringVar(value=self.upload_settings.get('age_restriction', 'none'))
+        age_combo = ttk.Combobox(age_frame, textvariable=self.config_age_restriction_var,
+                               values=["none", "18+"], state="readonly", width=15)
+        age_combo.pack(side=tk.LEFT)
+        
+        # === MONETIZATION & FEATURES SECTION ===
+        features_frame = tk.LabelFrame(scrollable_frame, text="💰 Monetization & Features", 
+                                     bg=self.colors['background'], fg=self.colors['primary'],
+                                     font=('Segoe UI', 11, 'bold'), padx=15, pady=15)
+        features_frame.pack(fill=tk.X, pady=(0,15))
+        
+        # Category
+        category_frame = tk.Frame(features_frame, bg=self.colors['background'])
+        category_frame.pack(fill=tk.X, pady=(0,10))
+        
+        tk.Label(category_frame, text="📂 Category:", font=('Segoe UI', 10, 'bold'),
+                bg=self.colors['background'], fg=self.colors['dark']).pack(side=tk.LEFT, padx=(0,10))
+        self.config_category_var = tk.StringVar(value=self.upload_settings.get('category', 'Entertainment'))
+        category_combo = ttk.Combobox(category_frame, textvariable=self.config_category_var,
+                                    values=["Entertainment", "Gaming", "Education", "Science & Technology", 
+                                           "Music", "Sports", "News & Politics", "Comedy", "Film & Animation",
+                                           "Autos & Vehicles", "Travel & Events", "Pets & Animals", "Howto & Style"],
+                                    state="readonly", width=25)
+        category_combo.pack(side=tk.LEFT)
+        
+        # Language
+        language_frame = tk.Frame(features_frame, bg=self.colors['background'])
+        language_frame.pack(fill=tk.X, pady=(0,10))
+        
+        tk.Label(language_frame, text="🌐 Language:", font=('Segoe UI', 10, 'bold'),
+                bg=self.colors['background'], fg=self.colors['dark']).pack(side=tk.LEFT, padx=(0,10))
+        self.config_language_var = tk.StringVar(value=self.upload_settings.get('language', 'English'))
+        language_combo = ttk.Combobox(language_frame, textvariable=self.config_language_var,
+                                    values=["English", "Vietnamese", "Chinese", "Japanese", "Korean", "Spanish", "French", "German"],
+                                    state="readonly", width=20)
+        language_combo.pack(side=tk.LEFT)
+        
+        # License
+        license_frame = tk.Frame(features_frame, bg=self.colors['background'])
+        license_frame.pack(fill=tk.X, pady=(0,10))
+        
+        tk.Label(license_frame, text="⚖️ License:", font=('Segoe UI', 10, 'bold'),
+                bg=self.colors['background'], fg=self.colors['dark']).pack(side=tk.LEFT, padx=(0,10))
+        self.config_license_var = tk.StringVar(value=self.upload_settings.get('license', 'Standard YouTube License'))
+        license_combo = ttk.Combobox(license_frame, textvariable=self.config_license_var,
+                                   values=["Standard YouTube License", "Creative Commons - Attribution"],
+                                   state="readonly", width=30)
+        license_combo.pack(side=tk.LEFT)
+        
+        # Checkboxes for additional features
+        features_checkboxes = tk.Frame(features_frame, bg=self.colors['background'])
+        features_checkboxes.pack(fill=tk.X, pady=(10,0))
+        
+        self.config_comments_var = tk.BooleanVar(value=self.upload_settings.get('allow_comments', True))
+        tk.Checkbutton(features_checkboxes, text="💬 Allow Comments", variable=self.config_comments_var,
+                      bg=self.colors['background'], fg=self.colors['dark'], font=('Segoe UI', 10),
+                      selectcolor='white').pack(anchor=tk.W)
+        
+        self.config_ratings_var = tk.BooleanVar(value=self.upload_settings.get('allow_ratings', True))
+        tk.Checkbutton(features_checkboxes, text="⭐ Allow Ratings", variable=self.config_ratings_var,
+                      bg=self.colors['background'], fg=self.colors['dark'], font=('Segoe UI', 10),
+                      selectcolor='white').pack(anchor=tk.W)
+        
+        self.config_embedding_var = tk.BooleanVar(value=self.upload_settings.get('allow_embedding', True))
+        tk.Checkbutton(features_checkboxes, text="🔗 Allow Embedding", variable=self.config_embedding_var,
+                      bg=self.colors['background'], fg=self.colors['dark'], font=('Segoe UI', 10),
+                      selectcolor='white').pack(anchor=tk.W)
+        
+        self.config_notify_var = tk.BooleanVar(value=self.upload_settings.get('notify_subscribers', True))
+        tk.Checkbutton(features_checkboxes, text="🔔 Notify Subscribers", variable=self.config_notify_var,
+                      bg=self.colors['background'], fg=self.colors['dark'], font=('Segoe UI', 10),
+                      selectcolor='white').pack(anchor=tk.W)
+        
+        # === SCHEDULING SECTION ===
+        schedule_frame = tk.LabelFrame(scrollable_frame, text="📅 Publishing Schedule", 
+                                     bg=self.colors['background'], fg=self.colors['primary'],
+                                     font=('Segoe UI', 11, 'bold'), padx=15, pady=15)
+        schedule_frame.pack(fill=tk.X, pady=(0,15))
+        
+        # Publish timing
+        publish_frame = tk.Frame(schedule_frame, bg=self.colors['background'])
+        publish_frame.pack(fill=tk.X, pady=(0,10))
+        
+        tk.Label(publish_frame, text="⏰ Publish:", font=('Segoe UI', 10, 'bold'),
+                bg=self.colors['background'], fg=self.colors['dark']).pack(side=tk.LEFT, padx=(0,10))
+        self.config_publish_var = tk.StringVar(value=self.upload_settings.get('publish_timing', 'immediately'))
+        publish_combo = ttk.Combobox(publish_frame, textvariable=self.config_publish_var,
+                                   values=["immediately", "scheduled"], state="readonly", width=15)
+        publish_combo.pack(side=tk.LEFT)
+        
+        # === THUMBNAIL SECTION ===
+        thumbnail_frame = tk.LabelFrame(scrollable_frame, text="🖼️ Thumbnail Settings", 
+                                      bg=self.colors['background'], fg=self.colors['primary'],
+                                      font=('Segoe UI', 11, 'bold'), padx=15, pady=15)
+        thumbnail_frame.pack(fill=tk.X, pady=(0,15))
+        
+        self.config_auto_thumb_var = tk.BooleanVar(value=self.upload_settings.get('auto_thumbnail', True))
+        tk.Checkbutton(thumbnail_frame, text="🤖 Use Auto-Generated Thumbnail", 
+                      variable=self.config_auto_thumb_var,
+                      bg=self.colors['background'], fg=self.colors['dark'], font=('Segoe UI', 10),
+                      selectcolor='white').pack(anchor=tk.W)
+        
+        # Custom thumbnail path
+        thumb_path_frame = tk.Frame(thumbnail_frame, bg=self.colors['background'])
+        thumb_path_frame.pack(fill=tk.X, pady=(5,0))
+        
+        tk.Label(thumb_path_frame, text="📁 Custom Thumbnail Path:", font=('Segoe UI', 10),
+                bg=self.colors['background'], fg=self.colors['dark']).pack(anchor=tk.W, pady=(0,5))
+        self.config_thumb_path_var = tk.StringVar(value=self.upload_settings.get('thumbnail_path', ''))
+        thumb_entry = tk.Entry(thumb_path_frame, textvariable=self.config_thumb_path_var, width=60,
+                              bg='white', fg=self.colors['dark'], font=('Segoe UI', 10))
+        thumb_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,10))
+        
+        tk.Button(thumb_path_frame, text="📁 Browse",
+                 command=lambda: self.browse_thumbnail_path(),
+                 bg=self.colors['primary'], fg='white', relief=tk.FLAT,
+                 font=('Segoe UI', 9, 'bold'), cursor='hand2', padx=15, pady=5).pack(side=tk.RIGHT)
+        
+        # === BUTTONS SECTION ===
+        button_frame = tk.Frame(scrollable_frame, bg=self.colors['background'])
         button_frame.pack(fill=tk.X, pady=(20,0))
         
+        # Reset to defaults
+        tk.Button(button_frame, text="🔄 Reset to Defaults",
+                 command=lambda: self.reset_config_defaults(config_window),
+                 bg=self.colors['warning'], fg='white', relief=tk.FLAT,
+                 font=('Segoe UI', 10, 'bold'), cursor='hand2', padx=20, pady=8).pack(side=tk.LEFT)
+        
+        # Cancel and Save buttons
         tk.Button(button_frame, text="❌ Cancel",
                  command=config_window.destroy,
                  bg=self.colors['danger'], fg='white', relief=tk.FLAT,
-                 font=('Segoe UI', 10, 'bold'), cursor='hand2', padx=20, pady=8).pack(side=tk.LEFT)
+                 font=('Segoe UI', 10, 'bold'), cursor='hand2', padx=20, pady=8).pack(side=tk.RIGHT, padx=(10,0))
         
         tk.Button(button_frame, text="✅ Save & Apply",
                  command=lambda: self.save_config_settings(config_window),
                  bg=self.colors['success'], fg='white', relief=tk.FLAT,
                  font=('Segoe UI', 10, 'bold'), cursor='hand2', padx=20, pady=8).pack(side=tk.RIGHT)
 
+    def browse_thumbnail_path(self):
+        """Browse for thumbnail image file"""
+        filename = filedialog.askopenfilename(
+            title="Select Thumbnail Image",
+            filetypes=[
+                ("Image files", "*.jpg *.jpeg *.png *.gif *.bmp"),
+                ("JPEG files", "*.jpg *.jpeg"),
+                ("PNG files", "*.png"),
+                ("All files", "*.*")
+            ]
+        )
+        if filename:
+            self.config_thumb_path_var.set(filename)
+
+    def reset_config_defaults(self, window):
+        """Reset configuration to default values"""
+        result = messagebox.askyesno(
+            "Reset to Defaults",
+            "🔄 Reset all settings to default values?\n\nThis will overwrite all your current configuration.",
+            parent=window
+        )
+        
+        if result:
+            # Default settings
+            defaults = {
+                'title_template': '[FILENAME]',
+                'description': 'Video uploaded using Douyin to YouTube Tool\n\n#douyin #tiktok #viral',
+                'tags': 'douyin,tiktok,viral,video',
+                'privacy': 'public',
+                'made_for_kids': 'no',
+                'age_restriction': 'none',
+                'category': 'Entertainment',
+                'language': 'English',
+                'license': 'Standard YouTube License',
+                'allow_comments': True,
+                'allow_ratings': True,
+                'allow_embedding': True,
+                'notify_subscribers': True,
+                'publish_timing': 'immediately',
+                'auto_thumbnail': True,
+                'thumbnail_path': ''
+            }
+            
+            # Update UI elements
+            self.config_title_var.set(defaults['title_template'])
+            self.config_desc_text.delete('1.0', tk.END)
+            self.config_desc_text.insert('1.0', defaults['description'])
+            self.config_tags_var.set(defaults['tags'])
+            self.config_privacy_var.set(defaults['privacy'])
+            self.config_kids_var.set(defaults['made_for_kids'])
+            self.config_age_restriction_var.set(defaults['age_restriction'])
+            self.config_category_var.set(defaults['category'])
+            self.config_language_var.set(defaults['language'])
+            self.config_license_var.set(defaults['license'])
+            self.config_comments_var.set(defaults['allow_comments'])
+            self.config_ratings_var.set(defaults['allow_ratings'])
+            self.config_embedding_var.set(defaults['allow_embedding'])
+            self.config_notify_var.set(defaults['notify_subscribers'])
+            self.config_publish_var.set(defaults['publish_timing'])
+            self.config_auto_thumb_var.set(defaults['auto_thumbnail'])
+            self.config_thumb_path_var.set(defaults['thumbnail_path'])
+            
+            messagebox.showinfo("Reset Complete", "✅ Configuration reset to default values!", parent=window)
+
     def save_config_settings(self, window):
-        """Save configuration settings and close window"""
-        # Update settings from UI
+        """Save comprehensive configuration settings and close window"""
+        # Update settings from UI with all new fields
         self.upload_settings.update({
             'title_template': self.config_title_var.get(),
             'description': self.config_desc_text.get('1.0', tk.END).strip(),
+            'tags': self.config_tags_var.get(),
             'privacy': self.config_privacy_var.get(),
-            'made_for_kids': self.config_kids_var.get()
+            'made_for_kids': self.config_kids_var.get(),
+            'age_restriction': self.config_age_restriction_var.get(),
+            'category': self.config_category_var.get(),
+            'language': self.config_language_var.get(),
+            'license': self.config_license_var.get(),
+            'allow_comments': self.config_comments_var.get(),
+            'allow_ratings': self.config_ratings_var.get(),
+            'allow_embedding': self.config_embedding_var.get(),
+            'notify_subscribers': self.config_notify_var.get(),
+            'publish_timing': self.config_publish_var.get(),
+            'auto_thumbnail': self.config_auto_thumb_var.get(),
+            'thumbnail_path': self.config_thumb_path_var.get()
         })
         
         # Save to file
         self.save_upload_settings()
         
-        # Show confirmation
-        messagebox.showinfo("Success", "✅ Upload settings saved successfully!")
+        # Show comprehensive confirmation
+        messagebox.showinfo(
+            "Configuration Saved", 
+            "✅ Upload configuration saved successfully!\n\n" +
+            f"📝 Title: {self.config_title_var.get()[:30]}...\n" +
+            f"🔒 Privacy: {self.config_privacy_var.get().title()}\n" +
+            f"📂 Category: {self.config_category_var.get()}\n" +
+            f"🌐 Language: {self.config_language_var.get()}\n\n" +
+            "These settings will be applied to all future uploads.",
+            parent=window
+        )
         
         window.destroy()
 
