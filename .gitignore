@@ -166,6 +166,7 @@ cython_debug/
 # Local Settings and Credentials
 credentials.json
 token.json
+token.pickle
 config.json
 settings.json
 
