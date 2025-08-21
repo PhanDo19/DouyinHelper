@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
 """
-🎬 Douyin to YouTube Tool - Final Version
+🎬 Douyin to YouTube Tool - Version 1.0.0
 All-in-one tool for downloading Douyin videos and uploading to YouTube
+
+Version: 1.0.0
+Release Date: August 21, 2025
+Author: PhanDo19
+Repository: https://github.com/PhanDo19/DouyinHelper
 """
+
+__version__ = "1.0.0"
+__author__ = "PhanDo19"
+__license__ = "MIT"
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, scrolledtext, simpledialog
@@ -3076,7 +3085,7 @@ class DouyinYouTubeTool:
         main_frame.pack(fill=tk.BOTH, expand=True)
         
         # Header with channel info
-        header_frame = tk.Frame(main_frame, bg=self.colors['light'])
+        header_frame = tk.Frame(main_frame, bg=self.colors['dark'])
         header_frame.pack(fill=tk.X, pady=(0, 15))
         
         tk.Label(header_frame, text="🚀 YouTube Manager Pro", 
@@ -4049,14 +4058,18 @@ class DouyinYouTubeTool:
         info_frame = ttk.LabelFrame(main_container, text="ℹ️ Application Info", padding="15")
         info_frame.pack(fill=tk.X)
         
-        info_text = """
-YouTube Manager Pro v2.0
-• Auto OAuth authentication
-• Real-time YouTube data
+        info_text = f"""
+Douyin to YouTube Tool v{__version__}
+• Auto OAuth authentication with YouTube API
+• Real-time YouTube data synchronization
 • Professional upload management
-• Comprehensive analytics
+• Comprehensive analytics dashboard
+• Video optimization for YouTube
 
-Developer: GitHub Copilot
+Developer: {__author__}
+Repository: https://github.com/PhanDo19/DouyinHelper
+License: {__license__}
+Release Date: August 21, 2025
 Built with Python & Tkinter
         """.strip()
         
