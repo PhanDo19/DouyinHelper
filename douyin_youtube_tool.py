@@ -13,23 +13,26 @@ __version__ = "1.0.0"
 __author__ = "PhanDo19"
 __license__ = "MIT"
 
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog, scrolledtext, simpledialog
+# Standard library imports
 import json
-import time
-import threading
 import os
+import platform
 import re
+import subprocess
+import threading
+import time
 import webbrowser
+from datetime import datetime
 from urllib.parse import urlparse, parse_qs, urlencode
 import urllib.request
 import urllib.error
-from datetime import datetime
-import subprocess
-import platform
 import http.cookiejar
 
-# Check YouTube API availability
+# Third-party imports
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog, scrolledtext, simpledialog
+
+# YouTube API imports (optional)
 YOUTUBE_AVAILABLE = False
 try:
     import googleapiclient.discovery
@@ -414,16 +417,15 @@ class YouTubeAPI:
             }
             
     def upload_video(self, video_file, title, description, tags, category="22", privacy_status="public"):
-        """Upload video to YouTube"""
+        """Upload video to YouTube with comprehensive error handling"""
         try:
-            # Check if we have real authentication
             if not self.authenticated or not self.service:
                 return {
                     'success': False,
                     'error': 'Not authenticated with YouTube'
                 }
             
-            # Demo mode - return mock data
+            # Demo mode simulation
             if self.service == 'demo_service':
                 import time
                 time.sleep(1)  # Simulate upload time
@@ -439,69 +441,76 @@ class YouTubeAPI:
                 }
             
             # Real YouTube API upload
-            if self.credentials:  # OAuth authentication
-                import os
-                from googleapiclient.http import MediaFileUpload
-                
-                # Prepare tags
-                if isinstance(tags, str):
-                    tags_list = [tag.strip() for tag in tags.split(',') if tag.strip()]
-                elif isinstance(tags, list):
-                    tags_list = tags
-                else:
-                    tags_list = []
-                
-                # Video metadata
-                body = {
-                    'snippet': {
-                        'title': title,
-                        'description': description,
-                        'tags': tags_list,
-                        'categoryId': category
-                    },
-                    'status': {
-                        'privacyStatus': privacy_status
-                    }
-                }
-                
-                # Upload video file
-                media = MediaFileUpload(video_file, chunksize=-1, resumable=True)
-                
-                request = self.service.videos().insert(
-                    part=','.join(body.keys()),
-                    body=body,
-                    media_body=media
-                )
-                
-                response = request.execute()
-                
-                if response:
-                    video_id = response['id']
-                    return {
-                        'success': True,
-                        'video_id': video_id,
-                        'title': title,
-                        'url': f'https://youtube.com/watch?v={video_id}',
-                        'upload_status': 'uploaded',
-                        'processing_status': 'processing',
-                        'privacy_status': privacy_status
-                    }
-                else:
-                    return {
-                        'success': False,
-                        'error': 'Upload failed - no response from YouTube'
-                    }
-            else:
+            if not self.credentials:
                 return {
                     'success': False,
-                    'error': 'Real upload requires OAuth authentication'
+                    'error': 'OAuth credentials required for uploading'
                 }
+                
+            return self._perform_real_upload(video_file, title, description, tags, category, privacy_status)
             
         except Exception as e:
             return {
                 'success': False,
-                'error': str(e)
+                'error': f'Upload failed: {str(e)}'
             }
+    
+    def _perform_real_upload(self, video_file, title, description, tags, category, privacy_status):
+        """Perform the actual YouTube upload"""
+        from googleapiclient.http import MediaFileUpload
+        
+        # Prepare tags
+        tags_list = self._prepare_tags(tags)
+        
+        # Video metadata
+        body = {
+            'snippet': {
+                'title': title,
+                'description': description,
+                'tags': tags_list,
+                'categoryId': category
+            },
+            'status': {
+                'privacyStatus': privacy_status
+            }
+        }
+        
+        # Upload video file
+        media = MediaFileUpload(video_file, chunksize=-1, resumable=True)
+        
+        request = self.service.videos().insert(
+            part=','.join(body.keys()),
+            body=body,
+            media_body=media
+        )
+        
+        response = request.execute()
+        
+        if response:
+            video_id = response['id']
+            return {
+                'success': True,
+                'video_id': video_id,
+                'title': title,
+                'url': f'https://youtube.com/watch?v={video_id}',
+                'upload_status': 'uploaded',
+                'processing_status': 'processing',
+                'privacy_status': privacy_status
+            }
+        else:
+            return {
+                'success': False,
+                'error': 'Upload failed - no response from YouTube'
+            }
+    
+    def _prepare_tags(self, tags):
+        """Prepare tags for upload"""
+        if isinstance(tags, str):
+            return [tag.strip() for tag in tags.split(',') if tag.strip()]
+        elif isinstance(tags, list):
+            return tags
+        else:
+            return []
             
     def upload_optimized_video(self, video_file, title, description, tags, category="22", privacy_status="public", optimize_quality=True, quality_preset="high"):
         """Upload optimized video to YouTube"""
@@ -709,61 +718,82 @@ class YouTubeAPI:
                 'error': str(e)
             }
 
-# Create global instance
+# Constants
+DOWNLOAD_FOLDER = os.path.expanduser("~/Downloads/Douyin")
+DEFAULT_UPLOAD_SETTINGS = {
+    'title_template': "[FILENAME] - Amazing Douyin Video! 🔥",
+    'description': "🎬 Amazing content from Douyin!\n\nFollow for more amazing videos!\nLike and Subscribe if you enjoyed!\n\n#Douyin #Viral #Entertainment #Shorts",
+    'tags': 'douyin,viral,entertainment,funny,trending,shorts',
+    'privacy': 'public',
+    'made_for_kids': 'no',
+    'age_restriction': 'none',
+    'category': 'Entertainment', 
+    'language': 'English',
+    'license': 'Standard YouTube License',
+    'allow_comments': True,
+    'allow_ratings': True,
+    'allow_embedding': True,
+    'notify_subscribers': True,
+    'publish_timing': 'immediately',
+    'quality': 'high',
+    'enable_monetization': False,
+    'thumbnail_generation': 'auto',
+    'auto_chapters': False,
+    'premiere_enabled': False,
+    'scheduled_time': None
+}
+
+# Global YouTube API instance
 youtube_api = YouTubeAPI() if YOUTUBE_AVAILABLE else None
 
 class DouyinYouTubeTool:
+    """Main application class for Douyin to YouTube tool"""
+    
     def __init__(self, root):
         self.root = root
+        self._init_window()
+        self._init_data()
+        self._init_youtube()
+        self._init_ui()
+        self._init_theme()
+        
+    def _init_window(self):
+        """Initialize main window"""
         self.root.title("🎬 Douyin to YouTube Tool")
         self.root.geometry("1400x900")
         self.root.resizable(True, True)
         
-        # Data
+    def _init_data(self):
+        """Initialize application data"""
         self.video_urls = []
         self.video_files = []
-        self.download_folder = os.path.expanduser("~/Downloads/Douyin")
+        self.download_folder = DOWNLOAD_FOLDER
         self.selected_videos = set()
         self.is_downloading = False
         self.is_uploading = False
         self.current_preview_path = None
         self.current_video_folder = None
+        self.current_video_data = {}
         
-        # Cookie jar
+        # Cookie jar for web requests
         self.cookie_jar = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cookie_jar))
         
-        # YouTube uploader
+        # Upload settings
+        self.upload_settings = DEFAULT_UPLOAD_SETTINGS.copy()
+        
+    def _init_youtube(self):
+        """Initialize YouTube uploader"""
         self.youtube_uploader = None
         if YOUTUBE_AVAILABLE:
             self.youtube_uploader = self.init_youtube_uploader()
+            
+    def _init_ui(self):
+        """Initialize user interface"""
+        self.setup_ui()
         
-        # Initialize comprehensive upload settings
-        self.upload_settings = {
-            'title_template': "[FILENAME] - Amazing Douyin Video! 🔥",
-            'description': "🎬 Amazing content from Douyin!\n\nFollow for more amazing videos!\nLike and Subscribe if you enjoyed!\n\n#Douyin #Viral #Entertainment #Shorts",
-            'tags': 'douyin,viral,entertainment,funny,trending,shorts',
-            'privacy': 'public',
-            'made_for_kids': 'no',
-            'age_restriction': 'none',
-            'category': 'Entertainment', 
-            'language': 'English',
-            'license': 'Standard YouTube License',
-            'allow_comments': True,
-            'allow_ratings': True,
-            'allow_embedding': True,
-            'notify_subscribers': True,
-            'publish_timing': 'immediately',
-            'auto_thumbnail': True,
-            'thumbnail_path': '',
-            'shorts_mode': True,
-            'quality': 'hd720',
-            'monetize_enabled': False,
-            'audience_type': 'general',
-            'publish_timing': 'immediate',
-            'notify_subscribers': True
-        }
-        
+    def _init_theme(self):
+        """Initialize application theme"""
         # Initialize upload control variables
         self.title_prefix_var = tk.StringVar(value="")
         self.tags_var = tk.StringVar(value=self.upload_settings['tags'])
@@ -771,12 +801,12 @@ class DouyinYouTubeTool:
         self.quality_preset_var = tk.StringVar(value="high")
         self.optimize_quality = tk.BooleanVar(value=True)
         
-        self.setup_ui()
-        self.create_download_folder()
-        self.load_upload_settings()
-        
         # Initialize auth status variable
         self.auth_status_var = None
+        
+        # Setup UI components
+        self.create_download_folder()
+        self.load_upload_settings()
         
     def init_youtube_uploader(self):
         """Initialize YouTube API"""
@@ -796,87 +826,101 @@ class DouyinYouTubeTool:
             messagebox.showerror("Error", "YouTube API not available!")
             return False
         
-        # Skip if already authenticated
         if self.youtube_uploader.authenticated:
             self.log("✅ Already authenticated with YouTube")
             return True
             
+        return self._handle_youtube_authentication()
+    
+    def _handle_youtube_authentication(self):
+        """Handle YouTube authentication process"""
         try:
-            # Ask user for authentication method
-            choice = messagebox.askyesnocancel(
-                "YouTube Authentication",
-                "Choose authentication method:\n\n" +
-                "✅ YES = OAuth Login (Full Access)\n" +
-                "   • Upload videos to YouTube\n" +
-                "   • Manage your channel\n" +
-                "   • Uses credentials.json\n\n" +
-                "⚠️ NO = API Key (Read Only)\n" +
-                "   • View channel statistics only\n" +
-                "   • Cannot upload videos\n\n" +
-                "❌ CANCEL = Demo Mode"
-            )
+            choice = self._show_auth_choice_dialog()
             
             if choice is True:  # OAuth
-                self.log("🔐 Starting OAuth authentication...")
-                success = self.youtube_uploader.authenticate()
-                if success:
-                    self.log("✅ OAuth authentication successful! Full YouTube access enabled.")
-                    self.update_auth_status()  # Update UI status
-                    return True
-                else:
-                    self.log("❌ OAuth authentication failed!")
-                    messagebox.showerror("Authentication Error", 
-                        "❌ OAuth authentication failed!\n\n" +
-                        "🔧 Please check:\n" +
-                        "• credentials.json file exists\n" +
-                        "• Internet connection\n" +
-                        "• Google OAuth permissions",
-                        parent=self.root)
-                    return False
-                    
+                return self._authenticate_oauth()
             elif choice is False:  # API Key
-                api_key = simpledialog.askstring(
-                    "YouTube API Key", 
-                    "Enter your YouTube Data API v3 key:\n\n" +
-                    "💡 To get an API key:\n" +
-                    "1. Go to Google Cloud Console\n" +
-                    "2. Create a project\n" +
-                    "3. Enable YouTube Data API v3\n" +
-                    "4. Create credentials (API key)\n\n" +
-                    "🎯 For testing, enter 'demo':",
-                    parent=self.root
-                )
-                
-                if api_key and api_key.strip():
-                    self.log("🔐 Authenticating with YouTube API key...")
-                    success = self.youtube_uploader.authenticate_with_api_key(api_key.strip())
-                    if success:
-                        self.log("✅ API key authentication successful! (Read-only access)")
-                        self.update_auth_status()  # Update UI status
-                        return True
-                    else:
-                        self.log("❌ API key authentication failed!")
-                        return False
-                else:
-                    self.log("ℹ️ API key authentication cancelled")
-                    return False
-                    
-            else:  # Cancel - Demo mode
-                self.log("ℹ️ Authentication cancelled - using demo mode")
-                # Set demo mode
-                self.youtube_uploader.service = 'demo_service'
-                self.youtube_uploader.youtube = 'demo_service'
-                self.youtube_uploader.authenticated = True
-                self.update_auth_status()  # Update UI status
-                return True
+                return self._authenticate_api_key()
+            else:  # Demo Mode
+                return self._authenticate_demo()
                 
         except Exception as e:
-            error_msg = f"❌ Authentication error: {str(e)}"
-            self.log(error_msg)
-            # Don't show error dialog if it's a dialog deletion error
-            if "was deleted before its visibility changed" not in str(e):
-                messagebox.showerror("Authentication Error", error_msg, parent=self.root)
+            self.log(f"❌ Authentication error: {e}")
             return False
+    
+    def _show_auth_choice_dialog(self):
+        """Show authentication choice dialog"""
+        return messagebox.askyesnocancel(
+            "YouTube Authentication",
+            "Choose authentication method:\n\n" +
+            "✅ YES = OAuth Login (Full Access)\n" +
+            "   • Upload videos to YouTube\n" +
+            "   • Manage your channel\n" +
+            "   • Uses credentials.json\n\n" +
+            "⚠️ NO = API Key (Read Only)\n" +
+            "   • View channel statistics only\n" +
+            "   • Cannot upload videos\n\n" +
+            "❌ CANCEL = Demo Mode"
+        )
+    
+    def _authenticate_oauth(self):
+        """Authenticate using OAuth"""
+        self.log("🔐 Starting OAuth authentication...")
+        success = self.youtube_uploader.authenticate()
+        if success:
+            self.log("✅ OAuth authentication successful! Full YouTube access enabled.")
+            self.update_auth_status()
+            return True
+        else:
+            self._show_oauth_error()
+            return False
+    
+    def _show_oauth_error(self):
+        """Show OAuth authentication error"""
+        messagebox.showerror("Authentication Error", 
+            "❌ OAuth authentication failed!\n\n" +
+            "🔧 Please check:\n" +
+            "• credentials.json file exists\n" +
+            "• Internet connection\n" +
+            "• Google OAuth permissions",
+            parent=self.root)
+    
+    def _authenticate_api_key(self):
+        """Authenticate using API key"""
+        api_key = simpledialog.askstring(
+            "YouTube API Key", 
+            "Enter your YouTube Data API v3 key:\n\n" +
+            "💡 To get an API key:\n" +
+            "1. Go to Google Cloud Console\n" +
+            "2. Create a project\n" +
+            "3. Enable YouTube Data API v3\n" +
+            "4. Create credentials (API key)\n\n" +
+            "🎯 For testing, enter 'demo':",
+            parent=self.root
+        )
+        
+        if api_key and api_key.strip():
+            self.log("🔐 Authenticating with YouTube API key...")
+            success = self.youtube_uploader.authenticate_with_api_key(api_key.strip())
+            if success:
+                self.log("✅ API key authentication successful! (Read-only access)")
+                self.update_auth_status()
+                return True
+            else:
+                self.log("❌ API key authentication failed!")
+                return False
+        else:
+            self.log("ℹ️ API key authentication cancelled")
+            return False
+    
+    def _authenticate_demo(self):
+        """Set up demo mode authentication"""
+        self.log("ℹ️ Authentication cancelled - using demo mode")
+        self.youtube_uploader.service = 'demo_service'
+        self.youtube_uploader.youtube = 'demo_service'
+        self.youtube_uploader.authenticated = True
+        self.update_auth_status()
+        return True
         
     def create_download_folder(self):
         """Create download folder if not exists"""
