@@ -4,14 +4,14 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.7+-blue.svg)](https://python.org)
 
-**All-in-one tool for downloading Douyin videos and managing YouTube uploads with professional interface.**
+**All-in-one tool for downloading Douyin videos and managing YouTube uploads with a professional interface.**
 
 ## ✨ Features
 
 ### 🎥 Video Management
 - **Douyin Video Downloader**: Download videos with various quality options
 - **YouTube Upload**: Upload videos with metadata and optimization
-- **File Organization**: Organized video selection and tracking
+- **File Organization**: Organized video selection and tracking 
 
 ### 🔐 Authentication & Security
 - **OAuth 2.0**: Secure YouTube authentication with Google OAuth
