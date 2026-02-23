@@ -467,6 +467,7 @@ class DouyinYouTubeTool:
         
         # Data
         self.video_urls = []
+        self.video_entries = []
         self.video_files = []
         self.download_folder = os.path.expanduser("~/Downloads/Douyin")
         self.selected_videos = set()
@@ -1440,12 +1441,16 @@ class DouyinYouTubeTool:
             for item in self.video_tree.get_children():
                 self.video_tree.delete(item)
             self.video_urls.clear()
+            self.video_entries.clear()
             
             # Fetch data
             max_cursor = 0
             page = 1
             
-            while page <= 5:  # Limit to 5 pages
+            seen_ids = set()
+            max_pages = 200
+
+            while page <= max_pages:
                 self.log(f"📄 Loading page {page}...")
                 
                 current_url = self.update_url_with_params(url, max_cursor, sec_user_id)
@@ -1462,16 +1467,26 @@ class DouyinYouTubeTool:
                 max_cursor = data.get('max_cursor', 0)
                 
                 for video in aweme_list:
-                    video_url = self.extract_video_url(video)
-                    if video_url:
-                        self.video_urls.append(video_url)
-                        index = len(self.video_urls)
-                        
-                        self.video_tree.insert('', 'end', values=(
-                            f"#{index:03d}",
-                            "📋 Found",
-                            video_url[:60] + "..." if len(video_url) > 60 else video_url
-                        ))
+                    video_info = self.extract_video_info(video)
+                    if not video_info:
+                        continue
+
+                    unique_key = video_info['aweme_id'] or video_info['url']
+                    if unique_key in seen_ids:
+                        continue
+                    seen_ids.add(unique_key)
+
+                    self.video_urls.append(video_info['url'])
+                    self.video_entries.append(video_info)
+                    index = len(self.video_entries)
+
+                    self.video_tree.insert('', 'end', values=(
+                        '☑',
+                        f"#{index:03d}",
+                        "📋 Found",
+                        video_info['title'],
+                        video_info['url'][:80] + "..." if len(video_info['url']) > 80 else video_info['url']
+                    ))
                         
                 if not has_more:
                     break
@@ -1485,6 +1500,9 @@ class DouyinYouTubeTool:
                 self.download_btn.config(state='normal')
             else:
                 self.log("❌ No videos found")
+
+            if page > max_pages:
+                self.log(f"⚠️ Reached page limit ({max_pages}). Please verify if profile has more videos.")
                 
         except Exception as e:
             self.log(f"❌ Analysis error: {e}")
@@ -1540,22 +1558,40 @@ class DouyinYouTubeTool:
         except:
             return {}
             
-    def extract_video_url(self, video_data):
-        """Extract video URL from API data"""
+    def extract_video_info(self, video_data):
+        """Extract video url + metadata from API data"""
         try:
-            if 'video' in video_data:
-                video_info = video_data['video']
-                
-                if 'play_addr' in video_info and 'url_list' in video_info['play_addr']:
-                    url_list = video_info['play_addr']['url_list']
-                    if url_list:
-                        url = url_list[0]
-                        return url.replace('http', 'https') if not url.startswith('https') else url
-                        
-        except:
-            pass
-            
-        return None
+            video_info = video_data.get('video', {})
+
+            url_list = video_info.get('play_addr', {}).get('url_list', [])
+            if not url_list and video_info.get('bit_rate'):
+                for bit_rate in video_info.get('bit_rate', []):
+                    url_list.extend(bit_rate.get('play_addr', {}).get('url_list', []))
+
+            if not url_list:
+                return None
+
+            raw_url = next((url for url in url_list if url), None)
+            if not raw_url:
+                return None
+
+            url = raw_url.replace('http://', 'https://')
+            # Prefer non-watermark variant if present in endpoint name
+            url = url.replace('playwm', 'play')
+
+            description = video_data.get('desc', '').strip()
+            title = description if description else f"Douyin Video {video_data.get('aweme_id', '')}".strip()
+            if len(title) > 80:
+                title = title[:77] + '...'
+
+            return {
+                'aweme_id': video_data.get('aweme_id', ''),
+                'title': title,
+                'url': url
+            }
+
+        except Exception:
+            return None
         
     def download_videos_thread(self):
         """Download videos in thread"""
@@ -1564,7 +1600,7 @@ class DouyinYouTubeTool:
         
     def download_videos(self):
         """Download all videos"""
-        if not self.video_urls:
+        if not self.video_entries:
             messagebox.showerror("Error", "No videos to download!")
             return
             
@@ -1575,7 +1611,18 @@ class DouyinYouTubeTool:
         self.is_downloading = True
         self.download_btn.config(state='disabled')
         
-        total_videos = len(self.video_urls)
+        selected_items = []
+        for item in self.video_tree.get_children():
+            if self.video_tree.set(item, 'Select') == '☑':
+                selected_items.append(item)
+
+        if not selected_items:
+            messagebox.showerror("Error", "Please select at least one video!")
+            self.download_btn.config(state='normal')
+            self.is_downloading = False
+            return
+
+        total_videos = len(selected_items)
         self.download_progress['maximum'] = total_videos
         self.download_progress['value'] = 0
         
@@ -1583,41 +1630,35 @@ class DouyinYouTubeTool:
         failed = 0
         
         try:
-            for i, url in enumerate(self.video_urls):
+            for i, item in enumerate(selected_items):
+                item_values = self.video_tree.item(item, 'values')
+                raw_index = item_values[1] if len(item_values) > 1 else f"#{i + 1:03d}"
+                entry_index = max(int(raw_index.replace('#', '')) - 1, 0)
+
+                if entry_index >= len(self.video_entries):
+                    failed += 1
+                    continue
+
+                current_video = self.video_entries[entry_index]
+                url = current_video['url']
+
                 filename = f"video_{i + 1:03d}.mp4"
                 file_path = os.path.join(self.download_folder, filename)
                 
-                # Update tree item
-                items = self.video_tree.get_children()
-                if i < len(items):
-                    self.video_tree.item(items[i], values=(
-                        f"#{i+1:03d}",
-                        "📥 Downloading...",
-                        url[:60] + "..." if len(url) > 60 else url
-                    ))
+                self.video_tree.set(item, 'Status', '📥 Downloading...')
                 
                 if self.download_single_video(url, file_path, i):
                     successful += 1
                     self.video_files.append({
                         'path': file_path,
                         'filename': filename,
-                        'size': self.get_file_size(file_path)
+                        'size': self.get_file_size(file_path),
+                        'title': current_video['title']
                     })
-                    
-                    if i < len(items):
-                        self.video_tree.item(items[i], values=(
-                            f"#{i+1:03d}",
-                            "✅ Downloaded",
-                            url[:60] + "..." if len(url) > 60 else url
-                        ))
+                    self.video_tree.set(item, 'Status', '✅ Downloaded')
                 else:
                     failed += 1
-                    if i < len(items):
-                        self.video_tree.item(items[i], values=(
-                            f"#{i+1:03d}",
-                            "❌ Failed",
-                            url[:60] + "..." if len(url) > 60 else url
-                        ))
+                    self.video_tree.set(item, 'Status', '❌ Failed')
                 
                 self.download_progress['value'] = i + 1
                 self.download_status_var.set(f"📥 Downloaded: {i + 1}/{total_videos}")
