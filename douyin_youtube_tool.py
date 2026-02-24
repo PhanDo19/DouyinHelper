@@ -13,8 +13,11 @@ __version__ = "1.0.0"
 __author__ = "PhanDo19"
 __license__ = "MIT"
 
+# Third-party imports
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, scrolledtext, simpledialog
+
+# Standard library imports
 import json
 import time
 import threading
@@ -29,6 +32,7 @@ import subprocess
 import platform
 import http.cookiejar
 
+# Optional browser cookie import
 try:
     import browser_cookie3
 except ImportError:
