@@ -13,6 +13,12 @@ __version__ = "1.0.0"
 __author__ = "PhanDo19"
 __license__ = "MIT"
 
+
+# Third-party imports
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog, scrolledtext, simpledialog
+
+
 # Standard library imports
 import json
 import os
@@ -28,11 +34,21 @@ import urllib.request
 import urllib.error
 import http.cookiejar
 
+
+# Optional browser cookie import
+try:
+    import browser_cookie3
+except ImportError:
+    browser_cookie3 = None
+
+# Check YouTube API availability
+=======
 # Third-party imports
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, scrolledtext, simpledialog
 
 # YouTube API imports (optional)
+
 YOUTUBE_AVAILABLE = False
 try:
     import googleapiclient.discovery
@@ -1267,6 +1283,20 @@ class DouyinYouTubeTool:
                              font=('Segoe UI', 10, 'bold'),
                              relief='flat', padx=15, pady=8)
         clear_btn.pack(side=tk.LEFT, padx=(0, 8))
+
+        douyin_btn = tk.Button(button_frame, text="🌐 Open Douyin",
+                              command=self.open_douyin_login,
+                              bg=self.colors['info'], fg='white',
+                              font=('Segoe UI', 10, 'bold'),
+                              relief='flat', padx=15, pady=8)
+        douyin_btn.pack(side=tk.LEFT, padx=(0, 8))
+
+        cookie_btn = tk.Button(button_frame, text="🍪 Auto Cookie",
+                              command=self.auto_import_douyin_cookies,
+                              bg=self.colors['secondary'], fg='white',
+                              font=('Segoe UI', 10, 'bold'),
+                              relief='flat', padx=15, pady=8)
+        cookie_btn.pack(side=tk.LEFT, padx=(0, 8))
         
         # Show advanced toggle with color
         self.show_advanced = tk.BooleanVar()
@@ -1297,6 +1327,27 @@ class DouyinYouTubeTool:
         download_frame.pack(fill=tk.BOTH, expand=True, pady=(15, 0))
         
         # Controls (Better layout)
+        quick_auth_frame = ttk.Frame(download_frame)
+        quick_auth_frame.pack(fill=tk.X, pady=(0, 8))
+
+        tk.Label(quick_auth_frame, text="🔐 Douyin Access:",
+                font=('Segoe UI', 9, 'bold'), background=self.colors['light'],
+                foreground=self.colors['dark']).pack(side=tk.LEFT, padx=(0, 8))
+
+        login_douyin_top_btn = tk.Button(quick_auth_frame, text="🌐 Login Douyin",
+                                        command=self.open_douyin_login,
+                                        bg=self.colors['info'], fg='white',
+                                        font=('Segoe UI', 9, 'bold'),
+                                        relief='flat', padx=12, pady=6)
+        login_douyin_top_btn.pack(side=tk.LEFT, padx=(0, 8))
+
+        cookie_top_btn = tk.Button(quick_auth_frame, text="🍪 Auto Cookie",
+                                   command=self.auto_import_douyin_cookies,
+                                   bg=self.colors['secondary'], fg='white',
+                                   font=('Segoe UI', 9, 'bold'),
+                                   relief='flat', padx=12, pady=6)
+        cookie_top_btn.pack(side=tk.LEFT, padx=(0, 8))
+
         control_frame = ttk.Frame(download_frame)
         control_frame.pack(fill=tk.X, pady=(0, 10))
         
@@ -1310,6 +1361,13 @@ class DouyinYouTubeTool:
                                font=('Segoe UI', 10, 'bold'),
                                relief='flat', padx=15, pady=8)
         analyze_btn.pack(side=tk.LEFT, padx=(0, 8))
+
+        login_douyin_btn = tk.Button(action_frame, text="🌐 Login Douyin",
+                                    command=self.open_douyin_login,
+                                    bg=self.colors['info'], fg='white',
+                                    font=('Segoe UI', 10, 'bold'),
+                                    relief='flat', padx=15, pady=8)
+        login_douyin_btn.pack(side=tk.LEFT, padx=(0, 8))
         
         folder_btn = tk.Button(action_frame, text="📁 Folder", 
                               command=self.select_download_folder,
@@ -1729,6 +1787,68 @@ class DouyinYouTubeTool:
         except:
             messagebox.showerror("Error", "No text in clipboard!")
             
+    def open_douyin_login(self):
+        """Open Douyin login page in default browser"""
+        try:
+            webbrowser.open("https://www.douyin.com/?recommend=1")
+            self.log("🌐 Opened Douyin in browser. Please login then click Auto Cookie.")
+        except Exception as e:
+            self.log(f"❌ Cannot open browser: {e}")
+
+    def auto_import_douyin_cookies(self):
+        """Try to load Douyin cookies from local browsers"""
+        if browser_cookie3 is None:
+            messagebox.showerror(
+                "Missing dependency",
+                "browser-cookie3 is not installed.\nRun: pip install browser-cookie3"
+            )
+            return
+
+        loaders = [
+            ("chrome", browser_cookie3.chrome),
+            ("edge", browser_cookie3.edge),
+            ("firefox", browser_cookie3.firefox),
+        ]
+
+        douyin_pairs = {}
+        loaded_from = []
+
+        for browser_name, loader in loaders:
+            try:
+                jar = loader()
+                count_before = len(douyin_pairs)
+                for cookie in jar:
+                    domain = getattr(cookie, 'domain', '') or ''
+                    if 'douyin.com' in domain:
+                        douyin_pairs[cookie.name] = cookie.value
+                if len(douyin_pairs) > count_before:
+                    loaded_from.append(browser_name)
+            except Exception:
+                continue
+
+        if not douyin_pairs:
+            messagebox.showwarning(
+                "No Douyin cookies",
+                "Could not find Douyin cookies.\nPlease login on Douyin in Chrome/Edge/Firefox first, then try again."
+            )
+            return
+
+        cookie_string = '; '.join(f"{k}={v}" for k, v in douyin_pairs.items())
+
+        headers = self.get_headers()
+        headers['Cookie'] = cookie_string
+        headers.setdefault('Referer', 'https://www.douyin.com/')
+        headers.setdefault('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+
+        self.headers_text.delete(1.0, tk.END)
+        self.headers_text.insert(tk.END, json.dumps(headers, indent=2))
+        self.show_advanced.set(True)
+        self.toggle_advanced()
+        self.show_headers.set(True)
+        self.toggle_headers()
+
+        self.log(f"🍪 Imported {len(douyin_pairs)} Douyin cookies from: {', '.join(loaded_from)}")
+
     def clear_curl(self):
         """Clear cURL text"""
         self.curl_text.delete(1.0, tk.END)

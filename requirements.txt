@@ -10,3 +10,6 @@ google-api-python-client>=2.70.0
 google-auth-httplib2>=0.1.0
 google-auth-oauthlib>=0.5.0
 google-auth>=2.15.0
+
+# Optional: import cookies from logged-in browser for Douyin
+browser-cookie3>=0.19.1
