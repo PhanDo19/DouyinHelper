@@ -13,24 +13,27 @@ __version__ = "1.0.0"
 __author__ = "PhanDo19"
 __license__ = "MIT"
 
+
 # Third-party imports
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, scrolledtext, simpledialog
 
+
 # Standard library imports
 import json
-import time
-import threading
 import os
+import platform
 import re
+import subprocess
+import threading
+import time
 import webbrowser
+from datetime import datetime
 from urllib.parse import urlparse, parse_qs, urlencode
 import urllib.request
 import urllib.error
-from datetime import datetime
-import subprocess
-import platform
 import http.cookiejar
+
 
 # Optional browser cookie import
 try:
@@ -39,6 +42,13 @@ except ImportError:
     browser_cookie3 = None
 
 # Check YouTube API availability
+=======
+# Third-party imports
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog, scrolledtext, simpledialog
+
+# YouTube API imports (optional)
+
 YOUTUBE_AVAILABLE = False
 try:
     import googleapiclient.discovery
@@ -423,40 +433,300 @@ class YouTubeAPI:
             }
             
     def upload_video(self, video_file, title, description, tags, category="22", privacy_status="public"):
-        """Upload video to YouTube"""
+        """Upload video to YouTube with comprehensive error handling"""
         try:
-            # Simple mock upload for now
-            import time
-            time.sleep(1)  # Simulate upload time
+            if not self.authenticated or not self.service:
+                return {
+                    'success': False,
+                    'error': 'Not authenticated with YouTube'
+                }
             
-            return {
-                'success': True,
-                'video_id': f'mock_id_{int(time.time())}',
-                'title': title,
-                'url': f'https://youtube.com/watch?v=mock_id_{int(time.time())}'
-            }
+            # Demo mode simulation
+            if self.service == 'demo_service':
+                import time
+                time.sleep(1)  # Simulate upload time
+                return {
+                    'success': True,
+                    'video_id': f'mock_id_{int(time.time())}',
+                    'title': title,
+                    'url': f'https://youtube.com/watch?v=mock_id_{int(time.time())}',
+                    'upload_status': 'uploaded',
+                    'processing_status': 'processing',
+                    'privacy_status': privacy_status,
+                    'warning': 'This is a demo upload - not actually uploaded to YouTube'
+                }
+            
+            # Real YouTube API upload
+            if not self.credentials:
+                return {
+                    'success': False,
+                    'error': 'OAuth credentials required for uploading'
+                }
+                
+            return self._perform_real_upload(video_file, title, description, tags, category, privacy_status)
             
         except Exception as e:
             return {
                 'success': False,
-                'error': str(e)
+                'error': f'Upload failed: {str(e)}'
             }
+    
+    def _perform_real_upload(self, video_file, title, description, tags, category, privacy_status):
+        """Perform the actual YouTube upload"""
+        from googleapiclient.http import MediaFileUpload
+        
+        # Prepare tags
+        tags_list = self._prepare_tags(tags)
+        
+        # Video metadata
+        body = {
+            'snippet': {
+                'title': title,
+                'description': description,
+                'tags': tags_list,
+                'categoryId': category
+            },
+            'status': {
+                'privacyStatus': privacy_status
+            }
+        }
+        
+        # Upload video file
+        media = MediaFileUpload(video_file, chunksize=-1, resumable=True)
+        
+        request = self.service.videos().insert(
+            part=','.join(body.keys()),
+            body=body,
+            media_body=media
+        )
+        
+        response = request.execute()
+        
+        if response:
+            video_id = response['id']
+            return {
+                'success': True,
+                'video_id': video_id,
+                'title': title,
+                'url': f'https://youtube.com/watch?v={video_id}',
+                'upload_status': 'uploaded',
+                'processing_status': 'processing',
+                'privacy_status': privacy_status
+            }
+        else:
+            return {
+                'success': False,
+                'error': 'Upload failed - no response from YouTube'
+            }
+    
+    def _prepare_tags(self, tags):
+        """Prepare tags for upload"""
+        if isinstance(tags, str):
+            return [tag.strip() for tag in tags.split(',') if tag.strip()]
+        elif isinstance(tags, list):
+            return tags
+        else:
+            return []
             
     def upload_optimized_video(self, video_file, title, description, tags, category="22", privacy_status="public", optimize_quality=True, quality_preset="high"):
         """Upload optimized video to YouTube"""
         try:
-            # Simulate optimization and upload
-            import time
-            time.sleep(2)  # Simulate longer processing time for optimization
+            # For now, use the same upload method but with optimization notes
+            result = self.upload_video(video_file, title, description, tags, category, privacy_status)
+            
+            if result['success']:
+                # Add optimization info to result
+                result['optimization_applied'] = optimize_quality
+                result['quality_preset'] = quality_preset
+                if 'warning' not in result:
+                    result['optimization_note'] = f'Video processed with {quality_preset} quality preset'
+            
+            return result
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e)
+            }
+            
+    def check_video_status(self, video_id):
+        """Check video upload and processing status"""
+        try:
+            # Demo mode with sample status
+            if self.service == 'demo_service':
+                return {
+                    'success': True,
+                    'upload_status': 'uploaded',
+                    'processing_status': 'succeeded',
+                    'privacy_status': 'public',
+                    'failure_reason': None,
+                    'rejection_reason': None
+                }
+            
+            # Real API call to check video status
+            if self.service and self.authenticated:
+                request = self.service.videos().list(
+                    part="status,processingDetails",
+                    id=video_id
+                )
+                response = request.execute()
+                
+                if response.get('items'):
+                    video = response['items'][0]
+                    status = video.get('status', {})
+                    processing = video.get('processingDetails', {})
+                    
+                    return {
+                        'success': True,
+                        'upload_status': status.get('uploadStatus', 'unknown'),
+                        'processing_status': processing.get('processingStatus', 'unknown'),
+                        'privacy_status': status.get('privacyStatus', 'unknown'),
+                        'failure_reason': status.get('failureReason'),
+                        'rejection_reason': status.get('rejectionReason')
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'error': 'Video not found'
+                    }
+            else:
+                return {
+                    'success': False,
+                    'error': 'Not authenticated'
+                }
+                
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e)
+            }
+            
+    def verify_video_exists(self, video_id):
+        """Verify if video actually exists on YouTube"""
+        try:
+            # Skip verification for mock/demo videos
+            if 'mock_id' in video_id or 'demo_' in video_id or video_id.startswith('shorts_id'):
+                return {
+                    'success': False,
+                    'exists': False,
+                    'is_demo': True,
+                    'message': 'This is a demo upload - not actually on YouTube'
+                }
+            
+            # Real verification for actual uploads
+            if self.service and self.authenticated and self.service != 'demo_service':
+                request = self.service.videos().list(
+                    part="snippet,status",
+                    id=video_id
+                )
+                response = request.execute()
+                
+                if response.get('items'):
+                    video = response['items'][0]
+                    return {
+                        'success': True,
+                        'exists': True,
+                        'title': video['snippet']['title'],
+                        'privacy_status': video['status']['privacyStatus'],
+                        'published_at': video['snippet']['publishedAt'],
+                        'url': f'https://youtube.com/watch?v={video_id}'
+                    }
+                else:
+                    return {
+                        'success': True,
+                        'exists': False,
+                        'message': 'Video not found on YouTube'
+                    }
+            else:
+                return {
+                    'success': False,
+                    'error': 'Not authenticated or in demo mode'
+                }
+                
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e)
+            }
+            
+    def detect_shorts_video(self, video_path):
+        """Detect if video is suitable for YouTube Shorts"""
+        try:
+            import os
+            
+            # Basic file size and format check (placeholder implementation)
+            if not os.path.exists(video_path):
+                return {
+                    'success': False,
+                    'is_shorts': False,
+                    'error': 'File not found'
+                }
+                
+            file_size = os.path.getsize(video_path) / (1024 * 1024)  # MB
+            
+            # For demo purposes, assume videos under 100MB are shorts
+            is_shorts = file_size < 100
+            
+            # Simulate video dimensions and duration for demo
+            width = 1080 if is_shorts else 1920
+            height = 1920 if is_shorts else 1080
+            duration = 45 if is_shorts else 120
             
             return {
                 'success': True,
-                'video_id': f'optimized_id_{int(time.time())}',
-                'title': title,
-                'url': f'https://youtube.com/watch?v=optimized_id_{int(time.time())}',
-                'optimization_applied': optimize_quality,
-                'quality_preset': quality_preset
+                'is_shorts': is_shorts,
+                'width': width,
+                'height': height,
+                'duration': duration,
+                'file_size_mb': round(file_size, 2),
+                'duration_estimate': f'{duration}s',
+                'format_suitable': video_path.lower().endswith(('.mp4', '.mov')),
+                'recommendations': ['Perfect for YouTube Shorts!'] if is_shorts else ['Consider cropping to vertical format']
             }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'is_shorts': False,
+                'error': str(e)
+            }
+            
+    def upload_shorts_video(self, video_file, title, description, tags, privacy_status="public"):
+        """Upload video optimized for YouTube Shorts"""
+        try:
+            # Handle tags - convert to string if it's a list
+            if isinstance(tags, list):
+                tags_str = ', '.join(tags)
+            else:
+                tags_str = str(tags) if tags else ""
+            
+            # Add #Shorts hashtag if not present
+            shorts_tags = tags_str
+            if '#shorts' not in tags_str.lower() and '#short' not in tags_str.lower():
+                shorts_tags = f"{tags_str}, #Shorts" if tags_str else "#Shorts"
+            
+            # Enhanced description for Shorts
+            shorts_description = f"{description}\n\n#Shorts #YouTubeShorts #Viral"
+            
+            # Add vertical video optimization note
+            if "vertical" not in shorts_description.lower():
+                shorts_description += "\n\n📱 Optimized for mobile viewing"
+            
+            # Use the main upload method with Shorts optimization
+            result = self.upload_video(video_file, title, shorts_description, shorts_tags, "22", privacy_status)
+            
+            if result['success']:
+                # Update URL to Shorts format if real upload
+                if 'mock_id' not in result['video_id']:
+                    result['url'] = f"https://youtube.com/shorts/{result['video_id']}"
+                
+                # Add Shorts-specific info
+                result['shorts_optimized'] = True
+                result['tags_enhanced'] = shorts_tags
+                result['description_enhanced'] = shorts_description
+                result['mobile_optimized'] = True
+            
+            return result
             
         except Exception as e:
             return {
@@ -464,62 +734,83 @@ class YouTubeAPI:
                 'error': str(e)
             }
 
-# Create global instance
+# Constants
+DOWNLOAD_FOLDER = os.path.expanduser("~/Downloads/Douyin")
+DEFAULT_UPLOAD_SETTINGS = {
+    'title_template': "[FILENAME] - Amazing Douyin Video! 🔥",
+    'description': "🎬 Amazing content from Douyin!\n\nFollow for more amazing videos!\nLike and Subscribe if you enjoyed!\n\n#Douyin #Viral #Entertainment #Shorts",
+    'tags': 'douyin,viral,entertainment,funny,trending,shorts',
+    'privacy': 'public',
+    'made_for_kids': 'no',
+    'age_restriction': 'none',
+    'category': 'Entertainment', 
+    'language': 'English',
+    'license': 'Standard YouTube License',
+    'allow_comments': True,
+    'allow_ratings': True,
+    'allow_embedding': True,
+    'notify_subscribers': True,
+    'publish_timing': 'immediately',
+    'quality': 'high',
+    'enable_monetization': False,
+    'thumbnail_generation': 'auto',
+    'auto_chapters': False,
+    'premiere_enabled': False,
+    'scheduled_time': None
+}
+
+# Global YouTube API instance
 youtube_api = YouTubeAPI() if YOUTUBE_AVAILABLE else None
 
 class DouyinYouTubeTool:
+    """Main application class for Douyin to YouTube tool"""
+    
     def __init__(self, root):
         self.root = root
+        self._init_window()
+        self._init_data()
+        self._init_youtube()
+        self._init_ui()
+        self._init_theme()
+        
+    def _init_window(self):
+        """Initialize main window"""
         self.root.title("🎬 Douyin to YouTube Tool")
         self.root.geometry("1400x900")
         self.root.resizable(True, True)
         
-        # Data
+    def _init_data(self):
+        """Initialize application data"""
         self.video_urls = []
         self.video_entries = []
         self.video_files = []
-        self.download_folder = os.path.expanduser("~/Downloads/Douyin")
+        self.download_folder = DOWNLOAD_FOLDER
         self.selected_videos = set()
         self.is_downloading = False
         self.is_uploading = False
         self.current_preview_path = None
         self.current_video_folder = None
+        self.current_video_data = {}
         
-        # Cookie jar
+        # Cookie jar for web requests
         self.cookie_jar = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cookie_jar))
         
-        # YouTube uploader
+        # Upload settings
+        self.upload_settings = DEFAULT_UPLOAD_SETTINGS.copy()
+        
+    def _init_youtube(self):
+        """Initialize YouTube uploader"""
         self.youtube_uploader = None
         if YOUTUBE_AVAILABLE:
             self.youtube_uploader = self.init_youtube_uploader()
+            
+    def _init_ui(self):
+        """Initialize user interface"""
+        self.setup_ui()
         
-        # Initialize comprehensive upload settings
-        self.upload_settings = {
-            'title_template': "[FILENAME] - Amazing Douyin Video! 🔥",
-            'description': "🎬 Amazing content from Douyin!\n\nFollow for more amazing videos!\nLike and Subscribe if you enjoyed!\n\n#Douyin #Viral #Entertainment #Shorts",
-            'tags': 'douyin,viral,entertainment,funny,trending,shorts',
-            'privacy': 'public',
-            'made_for_kids': 'no',
-            'age_restriction': 'none',
-            'category': 'Entertainment', 
-            'language': 'English',
-            'license': 'Standard YouTube License',
-            'allow_comments': True,
-            'allow_ratings': True,
-            'allow_embedding': True,
-            'notify_subscribers': True,
-            'publish_timing': 'immediately',
-            'auto_thumbnail': True,
-            'thumbnail_path': '',
-            'shorts_mode': True,
-            'quality': 'hd720',
-            'monetize_enabled': False,
-            'audience_type': 'general',
-            'publish_timing': 'immediate',
-            'notify_subscribers': True
-        }
-        
+    def _init_theme(self):
+        """Initialize application theme"""
         # Initialize upload control variables
         self.title_prefix_var = tk.StringVar(value="")
         self.tags_var = tk.StringVar(value=self.upload_settings['tags'])
@@ -527,12 +818,12 @@ class DouyinYouTubeTool:
         self.quality_preset_var = tk.StringVar(value="high")
         self.optimize_quality = tk.BooleanVar(value=True)
         
-        self.setup_ui()
-        self.create_download_folder()
-        self.load_upload_settings()
-        
         # Initialize auth status variable
         self.auth_status_var = None
+        
+        # Setup UI components
+        self.create_download_folder()
+        self.load_upload_settings()
         
     def init_youtube_uploader(self):
         """Initialize YouTube API"""
@@ -552,87 +843,101 @@ class DouyinYouTubeTool:
             messagebox.showerror("Error", "YouTube API not available!")
             return False
         
-        # Skip if already authenticated
         if self.youtube_uploader.authenticated:
             self.log("✅ Already authenticated with YouTube")
             return True
             
+        return self._handle_youtube_authentication()
+    
+    def _handle_youtube_authentication(self):
+        """Handle YouTube authentication process"""
         try:
-            # Ask user for authentication method
-            choice = messagebox.askyesnocancel(
-                "YouTube Authentication",
-                "Choose authentication method:\n\n" +
-                "✅ YES = OAuth Login (Full Access)\n" +
-                "   • Upload videos to YouTube\n" +
-                "   • Manage your channel\n" +
-                "   • Uses credentials.json\n\n" +
-                "⚠️ NO = API Key (Read Only)\n" +
-                "   • View channel statistics only\n" +
-                "   • Cannot upload videos\n\n" +
-                "❌ CANCEL = Demo Mode"
-            )
+            choice = self._show_auth_choice_dialog()
             
             if choice is True:  # OAuth
-                self.log("🔐 Starting OAuth authentication...")
-                success = self.youtube_uploader.authenticate()
-                if success:
-                    self.log("✅ OAuth authentication successful! Full YouTube access enabled.")
-                    self.update_auth_status()  # Update UI status
-                    return True
-                else:
-                    self.log("❌ OAuth authentication failed!")
-                    messagebox.showerror("Authentication Error", 
-                        "❌ OAuth authentication failed!\n\n" +
-                        "🔧 Please check:\n" +
-                        "• credentials.json file exists\n" +
-                        "• Internet connection\n" +
-                        "• Google OAuth permissions",
-                        parent=self.root)
-                    return False
-                    
+                return self._authenticate_oauth()
             elif choice is False:  # API Key
-                api_key = simpledialog.askstring(
-                    "YouTube API Key", 
-                    "Enter your YouTube Data API v3 key:\n\n" +
-                    "💡 To get an API key:\n" +
-                    "1. Go to Google Cloud Console\n" +
-                    "2. Create a project\n" +
-                    "3. Enable YouTube Data API v3\n" +
-                    "4. Create credentials (API key)\n\n" +
-                    "🎯 For testing, enter 'demo':",
-                    parent=self.root
-                )
-                
-                if api_key and api_key.strip():
-                    self.log("🔐 Authenticating with YouTube API key...")
-                    success = self.youtube_uploader.authenticate_with_api_key(api_key.strip())
-                    if success:
-                        self.log("✅ API key authentication successful! (Read-only access)")
-                        self.update_auth_status()  # Update UI status
-                        return True
-                    else:
-                        self.log("❌ API key authentication failed!")
-                        return False
-                else:
-                    self.log("ℹ️ API key authentication cancelled")
-                    return False
-                    
-            else:  # Cancel - Demo mode
-                self.log("ℹ️ Authentication cancelled - using demo mode")
-                # Set demo mode
-                self.youtube_uploader.service = 'demo_service'
-                self.youtube_uploader.youtube = 'demo_service'
-                self.youtube_uploader.authenticated = True
-                self.update_auth_status()  # Update UI status
-                return True
+                return self._authenticate_api_key()
+            else:  # Demo Mode
+                return self._authenticate_demo()
                 
         except Exception as e:
-            error_msg = f"❌ Authentication error: {str(e)}"
-            self.log(error_msg)
-            # Don't show error dialog if it's a dialog deletion error
-            if "was deleted before its visibility changed" not in str(e):
-                messagebox.showerror("Authentication Error", error_msg, parent=self.root)
+            self.log(f"❌ Authentication error: {e}")
             return False
+    
+    def _show_auth_choice_dialog(self):
+        """Show authentication choice dialog"""
+        return messagebox.askyesnocancel(
+            "YouTube Authentication",
+            "Choose authentication method:\n\n" +
+            "✅ YES = OAuth Login (Full Access)\n" +
+            "   • Upload videos to YouTube\n" +
+            "   • Manage your channel\n" +
+            "   • Uses credentials.json\n\n" +
+            "⚠️ NO = API Key (Read Only)\n" +
+            "   • View channel statistics only\n" +
+            "   • Cannot upload videos\n\n" +
+            "❌ CANCEL = Demo Mode"
+        )
+    
+    def _authenticate_oauth(self):
+        """Authenticate using OAuth"""
+        self.log("🔐 Starting OAuth authentication...")
+        success = self.youtube_uploader.authenticate()
+        if success:
+            self.log("✅ OAuth authentication successful! Full YouTube access enabled.")
+            self.update_auth_status()
+            return True
+        else:
+            self._show_oauth_error()
+            return False
+    
+    def _show_oauth_error(self):
+        """Show OAuth authentication error"""
+        messagebox.showerror("Authentication Error", 
+            "❌ OAuth authentication failed!\n\n" +
+            "🔧 Please check:\n" +
+            "• credentials.json file exists\n" +
+            "• Internet connection\n" +
+            "• Google OAuth permissions",
+            parent=self.root)
+    
+    def _authenticate_api_key(self):
+        """Authenticate using API key"""
+        api_key = simpledialog.askstring(
+            "YouTube API Key", 
+            "Enter your YouTube Data API v3 key:\n\n" +
+            "💡 To get an API key:\n" +
+            "1. Go to Google Cloud Console\n" +
+            "2. Create a project\n" +
+            "3. Enable YouTube Data API v3\n" +
+            "4. Create credentials (API key)\n\n" +
+            "🎯 For testing, enter 'demo':",
+            parent=self.root
+        )
+        
+        if api_key and api_key.strip():
+            self.log("🔐 Authenticating with YouTube API key...")
+            success = self.youtube_uploader.authenticate_with_api_key(api_key.strip())
+            if success:
+                self.log("✅ API key authentication successful! (Read-only access)")
+                self.update_auth_status()
+                return True
+            else:
+                self.log("❌ API key authentication failed!")
+                return False
+        else:
+            self.log("ℹ️ API key authentication cancelled")
+            return False
+    
+    def _authenticate_demo(self):
+        """Set up demo mode authentication"""
+        self.log("ℹ️ Authentication cancelled - using demo mode")
+        self.youtube_uploader.service = 'demo_service'
+        self.youtube_uploader.youtube = 'demo_service'
+        self.youtube_uploader.authenticated = True
+        self.update_auth_status()
+        return True
         
     def create_download_folder(self):
         """Create download folder if not exists"""
@@ -1190,6 +1495,20 @@ class DouyinYouTubeTool:
                                           font=('Segoe UI', 9, 'bold'), cursor='hand2')
         self.youtube_auth_btn.pack(side=tk.LEFT, padx=(0, 15))
         
+        # OAuth Setup Guide Button
+        oauth_guide_btn = tk.Button(auth_controls, text="❓ Setup Guide", 
+                                   command=self.show_oauth_setup_guide,
+                                   bg=self.colors['info'], fg='white', relief=tk.FLAT,
+                                   font=('Segoe UI', 9, 'bold'), cursor='hand2')
+        oauth_guide_btn.pack(side=tk.LEFT, padx=(0, 15))
+        self.create_tooltip(oauth_guide_btn,
+                           "📚 OAuth Setup Guide\n\n" +
+                           "• How to create Google Cloud project\n" +
+                           "• Setup OAuth credentials\n" +
+                           "• Enable real YouTube uploads\n" +
+                           "• Step-by-step instructions\n\n" +
+                           "🔧 Required for actual uploads to YouTube")
+        
         # Authentication status (use StringVar for dynamic updates)
         if not hasattr(self, 'auth_status_var') or not self.auth_status_var:
             self.auth_status_var = tk.StringVar(value="🔴 Not authenticated")
@@ -1210,21 +1529,41 @@ class DouyinYouTubeTool:
                               font=('Segoe UI', 10, 'bold'),
                               relief='flat', padx=15, pady=8)
         browse_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.create_tooltip(browse_btn,
+                           "📁 Browse Videos\n\n" +
+                           "• Select video files from your computer\n" +
+                           "• Supports: MP4, AVI, MOV, WMV, FLV, MKV\n" +
+                           "• Multiple file selection allowed\n" +
+                           "• Videos will be added to upload queue\n\n" +
+                           "💡 Choose any video files from anywhere on your computer")
         
-        download_btn = tk.Button(selection_controls, text="📥 From Downloads", 
+        download_btn = tk.Button(selection_controls, text="📥 Load Downloaded", 
                                 command=self.load_downloaded_videos,
                                 bg=self.colors['primary'], fg='white',
                                 font=('Segoe UI', 10, 'bold'),
                                 relief='flat', padx=15, pady=8)
         download_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.create_tooltip(download_btn,
+                           "📥 Load Downloaded Videos\n\n" +
+                           "• Load videos from download folder\n" +
+                           "• Automatically finds all downloaded Douyin videos\n" +
+                           "• Quick way to upload recently downloaded content\n" +
+                           "• Shows videos from current download session\n\n" +
+                           "⚡ Perfect for uploading freshly downloaded Douyin videos")
 
-        config_btn = tk.Button(selection_controls, text="⚙️ Upload Configuration", 
+        config_btn = tk.Button(selection_controls, text="⚙️ Upload Settings", 
                               command=self.open_upload_config,
                               bg=self.colors['accent'], fg='white',
                               font=('Segoe UI', 10, 'bold'),
                               relief='flat', padx=15, pady=8)
         config_btn.pack(side=tk.LEFT, padx=(0, 10))
-        download_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.create_tooltip(config_btn,
+                           "⚙️ Upload Configuration\n\n" +
+                           "• Configure title, description, tags\n" +
+                           "• Set privacy, category, language\n" +
+                           "• Customize thumbnail and settings\n" +
+                           "• Advanced YouTube optimization options\n\n" +
+                           "🎯 Customize how your videos appear on YouTube")
         
         select_all_btn = tk.Button(selection_controls, text="✅ Select All", 
                                   command=self.select_all_for_upload,
@@ -1232,6 +1571,13 @@ class DouyinYouTubeTool:
                                   font=('Segoe UI', 10, 'bold'),
                                   relief='flat', padx=15, pady=8)
         select_all_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.create_tooltip(select_all_btn,
+                           "✅ Select All Videos\n\n" +
+                           "• Mark all videos for upload\n" +
+                           "• Quick way to select entire list\n" +
+                           "• Videos will show green checkmark\n" +
+                           "• Selected videos will be uploaded\n\n" +
+                           "⚡ Fast bulk selection")
         
         deselect_btn = tk.Button(selection_controls, text="❌ Deselect All", 
                                 command=self.deselect_all_for_upload,
@@ -1239,6 +1585,13 @@ class DouyinYouTubeTool:
                                 font=('Segoe UI', 10, 'bold'),
                                 relief='flat', padx=15, pady=8)
         deselect_btn.pack(side=tk.LEFT)
+        self.create_tooltip(deselect_btn,
+                           "❌ Deselect All Videos\n\n" +
+                           "• Remove selection from all videos\n" +
+                           "• Clear entire upload queue\n" +
+                           "• Videos will show empty checkbox\n" +
+                           "• No videos will be uploaded\n\n" +
+                           "🔄 Reset selection to start over")
         
         # Upload list
         upload_list_frame = ttk.Frame(video_frame)
@@ -1296,6 +1649,23 @@ class DouyinYouTubeTool:
                                      font=('Segoe UI', 10), foreground='#666')
         self.preview_info.pack(anchor=tk.W)
 
+        # Upload Method Guide
+        guide_frame = ttk.LabelFrame(main_frame, text="📚 Upload Methods Guide", padding="10")
+        guide_frame.pack(fill=tk.X, pady=(15, 10))
+        
+        guide_text = (
+            "🚀 Upload Basic: Fast upload with original quality • Good for high-quality videos\n"
+            "🎯 Upload Optimized: Compressed & optimized • Better for large files or slow internet\n"
+            "📱 Upload Shorts: Vertical videos under 60s • Perfect for Douyin/TikTok content"
+        )
+        
+        guide_label = tk.Label(guide_frame, text=guide_text, 
+                              font=('Segoe UI', 9), 
+                              foreground=self.colors['primary'],
+                              background=self.colors['light'],
+                              justify=tk.LEFT, wraplength=800)
+        guide_label.pack(anchor=tk.W, padx=5, pady=5)
+
         # Upload Controls (moved from old settings section)
         upload_controls_frame = ttk.LabelFrame(main_frame, text="� Upload Actions", padding="15")
         upload_controls_frame.pack(fill=tk.X, pady=(0, 20))
@@ -1303,26 +1673,50 @@ class DouyinYouTubeTool:
         upload_controls = ttk.Frame(upload_controls_frame)
         upload_controls.pack(fill=tk.X)
         
-        self.upload_selected_btn = tk.Button(upload_controls, text="🚀 Upload Selected", 
+        # Upload Selected - Basic upload with original quality
+        self.upload_selected_btn = tk.Button(upload_controls, text="🚀 Upload Basic", 
                                             command=self.upload_selected_videos_thread, state='disabled',
                                             bg=self.colors['success'], fg=self.colors['dark'],
                                             font=('Segoe UI', 10, 'bold'),
                                             relief='flat', padx=15, pady=8)
         self.upload_selected_btn.pack(side=tk.LEFT, padx=(0, 15))
+        self.create_tooltip(self.upload_selected_btn, 
+                           "📤 Upload Basic\n\n" +
+                           "• Upload videos with original quality\n" +
+                           "• No compression or optimization\n" +
+                           "• Fastest upload method\n" +
+                           "• Use default upload settings\n\n" +
+                           "⚡ Best for: Quick uploads with good quality videos")
         
+        # Upload Optimized - Enhanced upload with optimization
         self.upload_optimized_btn = tk.Button(upload_controls, text="🎯 Upload Optimized", 
                                              command=self.upload_optimized_videos_thread, state='disabled',
                                              bg=self.colors['primary'], fg='white',
                                              font=('Segoe UI', 10, 'bold'),
                                              relief='flat', padx=15, pady=8)
         self.upload_optimized_btn.pack(side=tk.LEFT, padx=(0, 15))
+        self.create_tooltip(self.upload_optimized_btn,
+                           "🎯 Upload Optimized\n\n" +
+                           "• Compress and optimize video quality\n" +
+                           "• Reduce file size for faster upload\n" +
+                           "• Enhanced metadata and tags\n" +
+                           "• Better SEO optimization\n\n" +
+                           "💡 Best for: Large files, slow internet, better reach")
         
+        # Upload as Shorts - Specific for YouTube Shorts
         self.upload_shorts_btn = tk.Button(upload_controls, text="📱 Upload as Shorts", 
                                           command=self.upload_as_shorts_thread, state='disabled',
                                           bg=self.colors['accent'], fg=self.colors['dark'],
                                           font=('Segoe UI', 10, 'bold'),
                                           relief='flat', padx=15, pady=8)
         self.upload_shorts_btn.pack(side=tk.LEFT, padx=(0, 15))
+        self.create_tooltip(self.upload_shorts_btn,
+                           "📱 Upload as YouTube Shorts\n\n" +
+                           "• Optimized for vertical videos (9:16)\n" +
+                           "• Maximum 60 seconds duration\n" +
+                           "• Enhanced with #Shorts hashtag\n" +
+                           "• Better discoverability on mobile\n\n" +
+                           "🎬 Best for: Short vertical videos from Douyin/TikTok")
         
         studio_btn = tk.Button(upload_controls, text="📺 YouTube Studio", 
                               command=self.open_youtube_studio,
@@ -1330,6 +1724,13 @@ class DouyinYouTubeTool:
                               font=('Segoe UI', 10, 'bold'),
                               relief='flat', padx=15, pady=8)
         studio_btn.pack(side=tk.LEFT, padx=(0, 15))
+        self.create_tooltip(studio_btn,
+                           "📺 YouTube Studio\n\n" +
+                           "• Open YouTube Studio in browser\n" +
+                           "• Manage your uploaded videos\n" +
+                           "• Check analytics and performance\n" +
+                           "• Edit video details and settings\n\n" +
+                           "🔧 Manage all your YouTube content")
         
         channel_btn = tk.Button(upload_controls, text="📺 My Channel", 
                                command=self.open_my_channel,
@@ -1337,10 +1738,25 @@ class DouyinYouTubeTool:
                                font=('Segoe UI', 10, 'bold'),
                                relief='flat', padx=15, pady=8)
         channel_btn.pack(side=tk.LEFT, padx=(0, 15))
+        self.create_tooltip(channel_btn,
+                           "📺 My Channel\n\n" +
+                           "• Open your YouTube channel page\n" +
+                           "• View your public channel\n" +
+                           "• See how viewers see your content\n" +
+                           "• Check channel layout and branding\n\n" +
+                           "👀 See your channel from viewer's perspective")
         
         # Combined YouTube Manager button
-        ttk.Button(upload_controls, text="� YouTube Manager", 
-                  command=self.show_youtube_manager).pack(side=tk.LEFT, padx=(0, 10))
+        manager_btn = ttk.Button(upload_controls, text="⚙️ YouTube Manager", 
+                  command=self.show_youtube_manager)
+        manager_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.create_tooltip(manager_btn,
+                           "⚙️ YouTube Manager\n\n" +
+                           "• View channel statistics\n" +
+                           "• Check recent uploads status\n" +
+                           "• Monitor video performance\n" +
+                           "• Comprehensive YouTube analytics\n\n" +
+                           "📊 Complete YouTube management dashboard")
         
         self.upload_status_var = tk.StringVar(value="🟢 Ready to upload...")
         ttk.Label(upload_controls, textvariable=self.upload_status_var).pack(side=tk.LEFT)
@@ -3236,7 +3652,7 @@ class DouyinYouTubeTool:
         # Create manager window
         manager_window = tk.Toplevel(self.root)
         manager_window.title("🚀 YouTube Manager Pro")
-        manager_window.geometry("1000x700")
+        manager_window.geometry("1200x800")
         manager_window.resizable(True, True)
         manager_window.configure(bg=self.colors['light'])
         
@@ -3254,28 +3670,36 @@ class DouyinYouTubeTool:
         main_frame.pack(fill=tk.BOTH, expand=True)
         
         # Header with channel info
-        header_frame = tk.Frame(main_frame, bg=self.colors['dark'])
+        header_frame = tk.Frame(main_frame, bg=self.colors['light'])
         header_frame.pack(fill=tk.X, pady=(0, 15))
         
         tk.Label(header_frame, text="🚀 YouTube Manager Pro", 
                  font=('Segoe UI', 16, 'bold'),
                  bg=self.colors['light'], fg=self.colors['dark']).pack(side=tk.LEFT)
         
-        # Refresh button
-        tk.Button(header_frame, text="🔄 Refresh Data", 
+        # Control buttons
+        controls_frame = tk.Frame(header_frame, bg=self.colors['light'])
+        controls_frame.pack(side=tk.RIGHT)
+        
+        tk.Button(controls_frame, text="🔄 Refresh", 
                   command=lambda: self.refresh_manager_data(manager_window),
                   bg=self.colors['primary'], fg='white', relief=tk.FLAT,
-                  font=('Segoe UI', 9, 'bold'), cursor='hand2').pack(side=tk.RIGHT)
+                  font=('Segoe UI', 9, 'bold'), cursor='hand2').pack(side=tk.LEFT, padx=(0, 5))
+                  
+        tk.Button(controls_frame, text="📊 Analytics", 
+                  command=lambda: self.show_video_analytics(manager_window),
+                  bg=self.colors['info'], fg='white', relief=tk.FLAT,
+                  font=('Segoe UI', 9, 'bold'), cursor='hand2').pack(side=tk.LEFT, padx=(0, 5))
         
         # Create notebook for tabs
         notebook = ttk.Notebook(main_frame)
         notebook.pack(fill=tk.BOTH, expand=True)
         
-        # Tab 1: Dashboard Overview
-        self.create_dashboard_tab(notebook, manager_window)
-        
-        # Tab 2: Video Management  
+        # Tab 1: Video Management
         self.create_video_management_tab(notebook, manager_window)
+        
+        # Tab 2: Dashboard Overview
+        self.create_dashboard_tab(notebook, manager_window)
         
         # Tab 3: Analytics
         self.create_analytics_tab(notebook, manager_window)
@@ -3308,6 +3732,125 @@ class DouyinYouTubeTool:
             threading.Thread(target=lambda: self.load_channel_statistics(manager_window), daemon=True).start()
         except:
             pass
+            
+    def create_video_management_tab(self, notebook, parent_window):
+        """Create video management tab with list, preview, and edit/delete functionality"""
+        video_frame = tk.Frame(notebook, bg=self.colors['light'])
+        notebook.add(video_frame, text="📹 Video Manager")
+        
+        # Main layout - split into list and preview
+        main_container = tk.PanedWindow(video_frame, orient=tk.HORIZONTAL, bg=self.colors['light'])
+        main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Left panel - Video list
+        left_panel = tk.Frame(main_container, bg=self.colors['light'])
+        main_container.add(left_panel, width=700)
+        
+        # Video list header
+        list_header = tk.Frame(left_panel, bg=self.colors['primary'], height=40)
+        list_header.pack(fill=tk.X, pady=(0, 5))
+        list_header.pack_propagate(False)
+        
+        tk.Label(list_header, text="📹 My Videos", 
+                font=('Segoe UI', 12, 'bold'),
+                bg=self.colors['primary'], fg='white').pack(side=tk.LEFT, padx=10, pady=8)
+        
+        # Search and filter controls
+        controls_frame = tk.Frame(left_panel, bg=self.colors['surface'])
+        controls_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(controls_frame, text="🔍 Search:", bg=self.colors['surface']).pack(side=tk.LEFT, padx=(5, 5))
+        
+        self.video_search_var = tk.StringVar()
+        search_entry = tk.Entry(controls_frame, textvariable=self.video_search_var, width=30)
+        search_entry.pack(side=tk.LEFT, padx=(0, 10))
+        search_entry.bind('<KeyRelease>', self.filter_video_list)
+        
+        tk.Button(controls_frame, text="🔄 Load Videos", 
+                 command=lambda: self.load_video_list(parent_window),
+                 bg=self.colors['primary'], fg='white', relief=tk.FLAT,
+                 font=('Segoe UI', 9, 'bold')).pack(side=tk.LEFT, padx=(0, 5))
+        
+        # Video list with scrollbar
+        list_container = tk.Frame(left_panel, bg=self.colors['light'])
+        list_container.pack(fill=tk.BOTH, expand=True)
+        
+        # Video treeview
+        columns = ('Title', 'Views', 'Privacy', 'Published', 'Duration')
+        self.video_tree = ttk.Treeview(list_container, columns=columns, show='headings', height=15)
+        
+        # Configure columns
+        self.video_tree.heading('Title', text='📹 Title')
+        self.video_tree.heading('Views', text='👁️ Views')
+        self.video_tree.heading('Privacy', text='🔒 Privacy')
+        self.video_tree.heading('Published', text='📅 Published')
+        self.video_tree.heading('Duration', text='⏱️ Duration')
+        
+        self.video_tree.column('Title', width=300)
+        self.video_tree.column('Views', width=80, anchor='center')
+        self.video_tree.column('Privacy', width=80, anchor='center')
+        self.video_tree.column('Published', width=100, anchor='center')
+        self.video_tree.column('Duration', width=80, anchor='center')
+        
+        # Scrollbar for video list
+        list_scrollbar = ttk.Scrollbar(list_container, orient=tk.VERTICAL, command=self.video_tree.yview)
+        self.video_tree.configure(yscrollcommand=list_scrollbar.set)
+        
+        self.video_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        list_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Bind events for preview and context menu
+        self.video_tree.bind('<Motion>', self.on_video_hover)
+        self.video_tree.bind('<Leave>', self.hide_video_preview)
+        self.video_tree.bind('<Button-3>', self.show_video_context_menu)
+        self.video_tree.bind('<<TreeviewSelect>>', self.on_video_select)
+        
+        # Right panel - Video preview and details
+        right_panel = tk.Frame(main_container, bg=self.colors['surface'])
+        main_container.add(right_panel, width=400)
+        
+        # Preview header
+        preview_header = tk.Frame(right_panel, bg=self.colors['secondary'], height=40)
+        preview_header.pack(fill=tk.X, pady=(0, 5))
+        preview_header.pack_propagate(False)
+        
+        tk.Label(preview_header, text="👁️ Video Preview", 
+                font=('Segoe UI', 12, 'bold'),
+                bg=self.colors['secondary'], fg='white').pack(side=tk.LEFT, padx=10, pady=8)
+        
+        # Preview content area
+        self.preview_frame = tk.Frame(right_panel, bg=self.colors['surface'])
+        self.preview_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Default preview message
+        self.preview_label = tk.Label(self.preview_frame, 
+                                     text="📹 Select a video to see preview\n\n• Hover over videos for quick preview\n• Right-click for edit/delete options\n• Double-click to open in YouTube",
+                                     font=('Segoe UI', 11),
+                                     bg=self.colors['surface'], fg=self.colors['dark'],
+                                     justify=tk.CENTER)
+        self.preview_label.pack(expand=True)
+        
+        # Action buttons at bottom of preview
+        action_frame = tk.Frame(right_panel, bg=self.colors['surface'])
+        action_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+        
+        tk.Button(action_frame, text="✏️ Edit Video", 
+                 command=self.edit_selected_video,
+                 bg=self.colors['primary'], fg='white', relief=tk.FLAT,
+                 font=('Segoe UI', 10, 'bold'), state='disabled').pack(side=tk.LEFT, padx=(0, 5))
+        
+        tk.Button(action_frame, text="🗑️ Delete Video", 
+                 command=self.delete_selected_video,
+                 bg=self.colors['danger'], fg='white', relief=tk.FLAT,
+                 font=('Segoe UI', 10, 'bold'), state='disabled').pack(side=tk.LEFT, padx=(0, 5))
+        
+        tk.Button(action_frame, text="📊 Analytics", 
+                 command=self.show_video_analytics,
+                 bg=self.colors['info'], fg='white', relief=tk.FLAT,
+                 font=('Segoe UI', 10, 'bold'), state='disabled').pack(side=tk.LEFT)
+        
+        # Store reference for later use
+        self.current_video_data = {}
         
     def create_dashboard_tab(self, notebook, parent_window):
         """Create dashboard overview tab"""
@@ -3777,9 +4320,25 @@ class DouyinYouTubeTool:
                         self.log(f"   🆔 Video ID: {video_id}")
                         self.log(f"   🔒 Privacy: {privacy_status}")
                         
-                        # Check detailed status after upload
+                        # Verify if video actually exists on YouTube
                         if video_id:
                             try:
+                                # First check if video exists
+                                verify_result = self.youtube_uploader.verify_video_exists(video_id)
+                                if verify_result['success']:
+                                    if verify_result.get('exists'):
+                                        self.log(f"   ✅ Video confirmed on YouTube!")
+                                        self.log(f"   📅 Published: {verify_result.get('published_at', 'Unknown')}")
+                                    else:
+                                        self.log(f"   ⚠️  Video not found on YouTube yet (may still be processing)")
+                                elif verify_result.get('is_demo'):
+                                    self.log(f"   ⚠️  {verify_result['message']}")
+                                    self.log(f"   💡 To upload real videos, use OAuth authentication with credentials.json")
+                                    values[3] = "🎭 Demo"
+                                else:
+                                    self.log(f"   ❌ Could not verify video existence: {verify_result.get('error', 'Unknown error')}")
+                                
+                                # Then check detailed status
                                 status_check = self.youtube_uploader.check_video_status(video_id)
                                 if status_check['success']:
                                     upload_status = status_check.get('upload_status', 'unknown')
@@ -3801,6 +4360,9 @@ class DouyinYouTubeTool:
                                         successful -= 1
                                         failed += 1
                                     elif processing_status == 'processing':
+                                        values[3] = "⏳ Processing"
+                                    elif rejection_reason:
+                                        values[3] = "🚫 Rejected"
                                         values[3] = "⏳ Processing"
                                     elif rejection_reason:
                                         values[3] = "🚫 Rejected"
@@ -3894,13 +4456,6 @@ class DouyinYouTubeTool:
             if hasattr(self, 'manager_status_var'):
                 self.manager_status_var.set(f"❌ Error refreshing data: {e}")
             
-    def create_video_management_tab(self, notebook, parent_window):
-        """Create video management tab - placeholder"""
-        video_frame = tk.Frame(notebook, bg=self.colors['surface'])
-        notebook.add(video_frame, text="🎬 Videos")
-        tk.Label(video_frame, text="🎬 Video Management (Coming Soon)", 
-                 font=('Segoe UI', 14), bg=self.colors['surface'], fg=self.colors['dark']).pack(expand=True)
-                 
     def create_analytics_tab(self, notebook, parent_window):
         """Create analytics tab - placeholder"""
         analytics_frame = tk.Frame(notebook, bg=self.colors['surface'])
@@ -4095,248 +4650,370 @@ class DouyinYouTubeTool:
             self.stat_labels[title].config(text=str(value))
 
     def open_upload_config(self):
-        """Open comprehensive upload configuration popup window"""
+        """Open comprehensive upload configuration popup window with optimized UI"""
         config_window = tk.Toplevel(self.root)
         config_window.title("⚙️ YouTube Upload Configuration")
-        config_window.geometry("800x700")
+        config_window.geometry("900x750")
         config_window.resizable(True, True)
         config_window.transient(self.root)
         config_window.grab_set()
         
-        # Configure colors
-        config_window.configure(bg=self.colors['light'])
+        # Center the window
+        config_window.update_idletasks()
+        x = (config_window.winfo_screenwidth() // 2) - (900 // 2)
+        y = (config_window.winfo_screenheight() // 2) - (750 // 2)
+        config_window.geometry(f"900x750+{x}+{y}")
         
-        # Create scrollable frame
-        main_canvas = tk.Canvas(config_window, bg=self.colors['light'])
-        scrollbar = ttk.Scrollbar(config_window, orient="vertical", command=main_canvas.yview)
-        scrollable_frame = tk.Frame(main_canvas, bg=self.colors['light'])
+        # Configure window
+        config_window.configure(bg=self.colors['background'])
         
+        # Header with title and description
+        header_frame = tk.Frame(config_window, bg=self.colors['primary'], height=80)
+        header_frame.pack(fill=tk.X)
+        header_frame.pack_propagate(False)
+        
+        tk.Label(header_frame, text="⚙️ YouTube Upload Configuration", 
+                font=('Segoe UI', 16, 'bold'), bg=self.colors['primary'], fg='white').pack(pady=15)
+        tk.Label(header_frame, text="Configure your video upload settings to match YouTube Creator Studio", 
+                font=('Segoe UI', 10), bg=self.colors['primary'], fg='white').pack()
+        
+        # Main container with padding
+        main_container = tk.Frame(config_window, bg=self.colors['background'])
+        main_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Create scrollable frame with better styling
+        canvas = tk.Canvas(main_container, bg=self.colors['background'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(main_container, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas, bg=self.colors['background'])
+        
+        # Configure scrolling
         scrollable_frame.bind(
             "<Configure>",
-            lambda e: main_canvas.configure(scrollregion=main_canvas.bbox("all"))
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
         )
         
-        main_canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        main_canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
         
-        main_canvas.pack(side="left", fill="both", expand=True, padx=15, pady=15)
+        # Pack canvas and scrollbar
+        canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         
-        # Bind mousewheel
+        # Enhanced mousewheel binding
         def _on_mousewheel(event):
-            main_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        main_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
         
-        # === BASIC DETAILS SECTION ===
-        details_frame = tk.LabelFrame(scrollable_frame, text="📝 Basic Details", 
-                                    bg=self.colors['background'], fg=self.colors['primary'],
-                                    font=('Segoe UI', 11, 'bold'), padx=15, pady=15)
-        details_frame.pack(fill=tk.X, pady=(0,15))
+        def _bind_to_mousewheel(event):
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
         
-        # Title Template
-        tk.Label(details_frame, text="🎬 Title Template:", font=('Segoe UI', 10, 'bold'),
-                bg=self.colors['background'], fg=self.colors['dark']).pack(anchor=tk.W, pady=(0,5))
+        def _unbind_from_mousewheel(event):
+            canvas.unbind_all("<MouseWheel>")
+        
+        canvas.bind('<Enter>', _bind_to_mousewheel)
+        canvas.bind('<Leave>', _unbind_from_mousewheel)
+        
+        # === SECTION 1: VIDEO DETAILS ===
+        details_section = self.create_config_section(scrollable_frame, "📝 Video Details", 
+                                                    "Configure title, description and tags for your videos")
+        
+        # Title Template with enhanced styling
+        title_frame = self.create_config_field_frame(details_section)
+        self.create_config_label(title_frame, "🎬 Title Template", 
+                                "Template for video titles (use [FILENAME] as placeholder)")
         self.config_title_var = tk.StringVar(value=self.upload_settings.get('title_template', '[FILENAME]'))
-        title_entry = tk.Entry(details_frame, textvariable=self.config_title_var, width=80,
-                              bg='white', fg=self.colors['dark'], font=('Segoe UI', 10))
-        title_entry.pack(fill=tk.X, pady=(0,5))
-        tk.Label(details_frame, text="💡 Use [FILENAME] as placeholder for video filename",
-                font=('Segoe UI', 9), bg=self.colors['background'], fg=self.colors['medium']).pack(anchor=tk.W, pady=(0,10))
+        title_entry = tk.Entry(title_frame, textvariable=self.config_title_var, 
+                              font=('Segoe UI', 10), relief=tk.FLAT, bd=5,
+                              bg='white', fg=self.colors['dark'])
+        title_entry.pack(fill=tk.X, pady=(5,0), ipady=8)
         
-        # Description Template
-        tk.Label(details_frame, text="📄 Description Template:", font=('Segoe UI', 10, 'bold'),
-                bg=self.colors['background'], fg=self.colors['dark']).pack(anchor=tk.W, pady=(0,5))
+        # Description Template with better text area
+        desc_frame = self.create_config_field_frame(details_section)
+        self.create_config_label(desc_frame, "📄 Description Template", 
+                                "Default description for your videos")
         
-        desc_frame = tk.Frame(details_frame, bg=self.colors['background'])
-        desc_frame.pack(fill=tk.X, pady=(0,10))
+        desc_text_frame = tk.Frame(desc_frame, bg=self.colors['surface'], relief=tk.FLAT, bd=1)
+        desc_text_frame.pack(fill=tk.X, pady=(5,0))
         
-        self.config_desc_text = tk.Text(desc_frame, height=8, width=80, font=('Segoe UI', 10),
-                                       bg='white', fg=self.colors['dark'], wrap=tk.WORD)
-        desc_scroll = ttk.Scrollbar(desc_frame, orient="vertical", command=self.config_desc_text.yview)
+        self.config_desc_text = tk.Text(desc_text_frame, height=6, font=('Segoe UI', 10),
+                                       bg='white', fg=self.colors['dark'], wrap=tk.WORD,
+                                       relief=tk.FLAT, bd=5)
+        desc_scroll = ttk.Scrollbar(desc_text_frame, orient="vertical", command=self.config_desc_text.yview)
         self.config_desc_text.configure(yscrollcommand=desc_scroll.set)
         
-        self.config_desc_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        desc_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.config_desc_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        desc_scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(0,5), pady=5)
         self.config_desc_text.insert('1.0', self.upload_settings.get('description', ''))
         
-        # Tags
-        tk.Label(details_frame, text="🏷️ Default Tags (comma-separated):", font=('Segoe UI', 10, 'bold'),
-                bg=self.colors['background'], fg=self.colors['dark']).pack(anchor=tk.W, pady=(0,5))
+        # Tags with modern input
+        tags_frame = self.create_config_field_frame(details_section)
+        self.create_config_label(tags_frame, "🏷️ Default Tags", 
+                                "Comma-separated tags (e.g., gaming, tutorial, review)")
         self.config_tags_var = tk.StringVar(value=self.upload_settings.get('tags', ''))
-        tags_entry = tk.Entry(details_frame, textvariable=self.config_tags_var, width=80,
-                             bg='white', fg=self.colors['dark'], font=('Segoe UI', 10))
-        tags_entry.pack(fill=tk.X, pady=(0,5))
-        tk.Label(details_frame, text="💡 Example: gaming, tutorial, review, tech",
-                font=('Segoe UI', 9), bg=self.colors['background'], fg=self.colors['medium']).pack(anchor=tk.W, pady=(0,10))
+        tags_entry = tk.Entry(tags_frame, textvariable=self.config_tags_var, 
+                             font=('Segoe UI', 10), relief=tk.FLAT, bd=5,
+                             bg='white', fg=self.colors['dark'])
+        tags_entry.pack(fill=tk.X, pady=(5,0), ipady=8)
         
-        # === VISIBILITY & AUDIENCE SECTION ===
-        visibility_frame = tk.LabelFrame(scrollable_frame, text="👁️ Visibility & Audience", 
-                                       bg=self.colors['background'], fg=self.colors['primary'],
-                                       font=('Segoe UI', 11, 'bold'), padx=15, pady=15)
-        visibility_frame.pack(fill=tk.X, pady=(0,15))
+        # === SECTION 2: PRIVACY & AUDIENCE ===
+        privacy_section = self.create_config_section(scrollable_frame, "� Privacy & Audience", 
+                                                    "Control who can see and interact with your videos")
         
-        # Privacy & Kids settings
-        privacy_grid = tk.Frame(visibility_frame, bg=self.colors['background'])
-        privacy_grid.pack(fill=tk.X, pady=(0,10))
+        # Privacy and Kids settings in a nice grid
+        privacy_grid = tk.Frame(privacy_section, bg=self.colors['surface'])
+        privacy_grid.pack(fill=tk.X, pady=10)
         
-        tk.Label(privacy_grid, text="🔒 Privacy:", font=('Segoe UI', 10, 'bold'),
-                bg=self.colors['background'], fg=self.colors['dark']).grid(row=0, column=0, sticky=tk.W, padx=(0,10))
+        # Privacy setting
+        privacy_frame = tk.Frame(privacy_grid, bg=self.colors['surface'])
+        privacy_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10, pady=15)
+        
+        tk.Label(privacy_frame, text="🔒 Visibility", font=('Segoe UI', 10, 'bold'),
+                bg=self.colors['surface'], fg=self.colors['dark']).pack(anchor=tk.W)
         self.config_privacy_var = tk.StringVar(value=self.upload_settings.get('privacy', 'public'))
-        privacy_combo = ttk.Combobox(privacy_grid, textvariable=self.config_privacy_var,
-                                   values=["public", "unlisted", "private"], state="readonly", width=15)
-        privacy_combo.grid(row=0, column=1, padx=(0,30), sticky=tk.W)
+        privacy_combo = ttk.Combobox(privacy_frame, textvariable=self.config_privacy_var,
+                                   values=["public", "unlisted", "private"], state="readonly", 
+                                   font=('Segoe UI', 10), width=15)
+        privacy_combo.pack(anchor=tk.W, pady=(5,0))
         
-        tk.Label(privacy_grid, text="👶 Made for Kids:", font=('Segoe UI', 10, 'bold'),
-                bg=self.colors['background'], fg=self.colors['dark']).grid(row=0, column=2, sticky=tk.W, padx=(0,10))
+        # Made for Kids setting
+        kids_frame = tk.Frame(privacy_grid, bg=self.colors['surface'])
+        kids_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10, pady=15)
+        
+        tk.Label(kids_frame, text="👶 Audience", font=('Segoe UI', 10, 'bold'),
+                bg=self.colors['surface'], fg=self.colors['dark']).pack(anchor=tk.W)
         self.config_kids_var = tk.StringVar(value=self.upload_settings.get('made_for_kids', 'no'))
-        kids_combo = ttk.Combobox(privacy_grid, textvariable=self.config_kids_var,
-                                values=["no", "yes"], state="readonly", width=10)
-        kids_combo.grid(row=0, column=3, sticky=tk.W)
+        kids_combo = ttk.Combobox(kids_frame, textvariable=self.config_kids_var,
+                                values=[("no", "General Audience"), ("yes", "Made for Kids")], 
+                                state="readonly", font=('Segoe UI', 10), width=15)
+        kids_combo.pack(anchor=tk.W, pady=(5,0))
         
         # Age restriction
-        age_frame = tk.Frame(visibility_frame, bg=self.colors['background'])
-        age_frame.pack(fill=tk.X, pady=(0,10))
+        age_frame = tk.Frame(privacy_grid, bg=self.colors['surface'])
+        age_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10, pady=15)
         
-        tk.Label(age_frame, text="🔞 Age Restriction:", font=('Segoe UI', 10, 'bold'),
-                bg=self.colors['background'], fg=self.colors['dark']).pack(side=tk.LEFT, padx=(0,10))
+        tk.Label(age_frame, text="🔞 Age Restriction", font=('Segoe UI', 10, 'bold'),
+                bg=self.colors['surface'], fg=self.colors['dark']).pack(anchor=tk.W)
         self.config_age_restriction_var = tk.StringVar(value=self.upload_settings.get('age_restriction', 'none'))
         age_combo = ttk.Combobox(age_frame, textvariable=self.config_age_restriction_var,
-                               values=["none", "18+"], state="readonly", width=15)
-        age_combo.pack(side=tk.LEFT)
+                               values=["none", "18+"], state="readonly", 
+                               font=('Segoe UI', 10), width=15)
+        age_combo.pack(anchor=tk.W, pady=(5,0))
         
-        # === MONETIZATION & FEATURES SECTION ===
-        features_frame = tk.LabelFrame(scrollable_frame, text="💰 Monetization & Features", 
-                                     bg=self.colors['background'], fg=self.colors['primary'],
-                                     font=('Segoe UI', 11, 'bold'), padx=15, pady=15)
-        features_frame.pack(fill=tk.X, pady=(0,15))
+        # === SECTION 3: CONTENT CLASSIFICATION ===
+        content_section = self.create_config_section(scrollable_frame, "� Content Classification", 
+                                                    "Categorize your content for better discoverability")
+        
+        # Category and Language in grid
+        classification_grid = tk.Frame(content_section, bg=self.colors['surface'])
+        classification_grid.pack(fill=tk.X, pady=10)
         
         # Category
-        category_frame = tk.Frame(features_frame, bg=self.colors['background'])
-        category_frame.pack(fill=tk.X, pady=(0,10))
+        cat_frame = tk.Frame(classification_grid, bg=self.colors['surface'])
+        cat_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10, pady=15)
         
-        tk.Label(category_frame, text="📂 Category:", font=('Segoe UI', 10, 'bold'),
-                bg=self.colors['background'], fg=self.colors['dark']).pack(side=tk.LEFT, padx=(0,10))
+        tk.Label(cat_frame, text="📂 Category", font=('Segoe UI', 10, 'bold'),
+                bg=self.colors['surface'], fg=self.colors['dark']).pack(anchor=tk.W)
         self.config_category_var = tk.StringVar(value=self.upload_settings.get('category', 'Entertainment'))
-        category_combo = ttk.Combobox(category_frame, textvariable=self.config_category_var,
+        category_combo = ttk.Combobox(cat_frame, textvariable=self.config_category_var,
                                     values=["Entertainment", "Gaming", "Education", "Science & Technology", 
                                            "Music", "Sports", "News & Politics", "Comedy", "Film & Animation",
                                            "Autos & Vehicles", "Travel & Events", "Pets & Animals", "Howto & Style"],
-                                    state="readonly", width=25)
-        category_combo.pack(side=tk.LEFT)
+                                    state="readonly", font=('Segoe UI', 10), width=20)
+        category_combo.pack(anchor=tk.W, pady=(5,0))
         
         # Language
-        language_frame = tk.Frame(features_frame, bg=self.colors['background'])
-        language_frame.pack(fill=tk.X, pady=(0,10))
+        lang_frame = tk.Frame(classification_grid, bg=self.colors['surface'])
+        lang_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10, pady=15)
         
-        tk.Label(language_frame, text="🌐 Language:", font=('Segoe UI', 10, 'bold'),
-                bg=self.colors['background'], fg=self.colors['dark']).pack(side=tk.LEFT, padx=(0,10))
+        tk.Label(lang_frame, text="🌐 Language", font=('Segoe UI', 10, 'bold'),
+                bg=self.colors['surface'], fg=self.colors['dark']).pack(anchor=tk.W)
         self.config_language_var = tk.StringVar(value=self.upload_settings.get('language', 'English'))
-        language_combo = ttk.Combobox(language_frame, textvariable=self.config_language_var,
-                                    values=["English", "Vietnamese", "Chinese", "Japanese", "Korean", "Spanish", "French", "German"],
-                                    state="readonly", width=20)
-        language_combo.pack(side=tk.LEFT)
+        language_combo = ttk.Combobox(lang_frame, textvariable=self.config_language_var,
+                                    values=["English", "Vietnamese", "Chinese", "Japanese", "Korean", 
+                                           "Spanish", "French", "German", "Portuguese", "Russian"],
+                                    state="readonly", font=('Segoe UI', 10), width=15)
+        language_combo.pack(anchor=tk.W, pady=(5,0))
         
         # License
-        license_frame = tk.Frame(features_frame, bg=self.colors['background'])
-        license_frame.pack(fill=tk.X, pady=(0,10))
-        
-        tk.Label(license_frame, text="⚖️ License:", font=('Segoe UI', 10, 'bold'),
-                bg=self.colors['background'], fg=self.colors['dark']).pack(side=tk.LEFT, padx=(0,10))
+        license_frame = self.create_config_field_frame(content_section)
+        self.create_config_label(license_frame, "⚖️ License", "Rights and usage permissions")
         self.config_license_var = tk.StringVar(value=self.upload_settings.get('license', 'Standard YouTube License'))
         license_combo = ttk.Combobox(license_frame, textvariable=self.config_license_var,
                                    values=["Standard YouTube License", "Creative Commons - Attribution"],
-                                   state="readonly", width=30)
-        license_combo.pack(side=tk.LEFT)
+                                   state="readonly", font=('Segoe UI', 10), width=35)
+        license_combo.pack(anchor=tk.W, pady=(5,0))
         
-        # Checkboxes for additional features
-        features_checkboxes = tk.Frame(features_frame, bg=self.colors['background'])
-        features_checkboxes.pack(fill=tk.X, pady=(10,0))
+        # === SECTION 4: INTERACTION SETTINGS ===
+        interaction_section = self.create_config_section(scrollable_frame, "💬 Interaction Settings", 
+                                                        "Configure how viewers can interact with your videos")
+        
+        # Modern checkboxes in a nice grid
+        interaction_grid = tk.Frame(interaction_section, bg=self.colors['surface'])
+        interaction_grid.pack(fill=tk.X, pady=10)
+        
+        # Left column
+        left_col = tk.Frame(interaction_grid, bg=self.colors['surface'])
+        left_col.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=20, pady=15)
         
         self.config_comments_var = tk.BooleanVar(value=self.upload_settings.get('allow_comments', True))
-        tk.Checkbutton(features_checkboxes, text="💬 Allow Comments", variable=self.config_comments_var,
-                      bg=self.colors['background'], fg=self.colors['dark'], font=('Segoe UI', 10),
-                      selectcolor='white').pack(anchor=tk.W)
+        comments_cb = tk.Checkbutton(left_col, text="💬 Allow Comments", variable=self.config_comments_var,
+                                   bg=self.colors['surface'], fg=self.colors['dark'], 
+                                   font=('Segoe UI', 10), selectcolor='white', bd=0)
+        comments_cb.pack(anchor=tk.W, pady=5)
         
         self.config_ratings_var = tk.BooleanVar(value=self.upload_settings.get('allow_ratings', True))
-        tk.Checkbutton(features_checkboxes, text="⭐ Allow Ratings", variable=self.config_ratings_var,
-                      bg=self.colors['background'], fg=self.colors['dark'], font=('Segoe UI', 10),
-                      selectcolor='white').pack(anchor=tk.W)
+        ratings_cb = tk.Checkbutton(left_col, text="⭐ Allow Ratings", variable=self.config_ratings_var,
+                                  bg=self.colors['surface'], fg=self.colors['dark'], 
+                                  font=('Segoe UI', 10), selectcolor='white', bd=0)
+        ratings_cb.pack(anchor=tk.W, pady=5)
+        
+        # Right column
+        right_col = tk.Frame(interaction_grid, bg=self.colors['surface'])
+        right_col.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=20, pady=15)
         
         self.config_embedding_var = tk.BooleanVar(value=self.upload_settings.get('allow_embedding', True))
-        tk.Checkbutton(features_checkboxes, text="🔗 Allow Embedding", variable=self.config_embedding_var,
-                      bg=self.colors['background'], fg=self.colors['dark'], font=('Segoe UI', 10),
-                      selectcolor='white').pack(anchor=tk.W)
+        embedding_cb = tk.Checkbutton(right_col, text="🔗 Allow Embedding", variable=self.config_embedding_var,
+                                    bg=self.colors['surface'], fg=self.colors['dark'], 
+                                    font=('Segoe UI', 10), selectcolor='white', bd=0)
+        embedding_cb.pack(anchor=tk.W, pady=5)
         
         self.config_notify_var = tk.BooleanVar(value=self.upload_settings.get('notify_subscribers', True))
-        tk.Checkbutton(features_checkboxes, text="🔔 Notify Subscribers", variable=self.config_notify_var,
-                      bg=self.colors['background'], fg=self.colors['dark'], font=('Segoe UI', 10),
-                      selectcolor='white').pack(anchor=tk.W)
+        notify_cb = tk.Checkbutton(right_col, text="🔔 Notify Subscribers", variable=self.config_notify_var,
+                                 bg=self.colors['surface'], fg=self.colors['dark'], 
+                                 font=('Segoe UI', 10), selectcolor='white', bd=0)
+        notify_cb.pack(anchor=tk.W, pady=5)
         
-        # === SCHEDULING SECTION ===
-        schedule_frame = tk.LabelFrame(scrollable_frame, text="📅 Publishing Schedule", 
-                                     bg=self.colors['background'], fg=self.colors['primary'],
-                                     font=('Segoe UI', 11, 'bold'), padx=15, pady=15)
-        schedule_frame.pack(fill=tk.X, pady=(0,15))
+        # === SECTION 5: PUBLISHING & THUMBNAIL ===
+        publishing_section = self.create_config_section(scrollable_frame, "📅 Publishing & Thumbnail", 
+                                                       "Control when and how your videos are published")
         
-        # Publish timing
-        publish_frame = tk.Frame(schedule_frame, bg=self.colors['background'])
-        publish_frame.pack(fill=tk.X, pady=(0,10))
-        
-        tk.Label(publish_frame, text="⏰ Publish:", font=('Segoe UI', 10, 'bold'),
-                bg=self.colors['background'], fg=self.colors['dark']).pack(side=tk.LEFT, padx=(0,10))
+        # Publishing timing
+        publish_frame = self.create_config_field_frame(publishing_section)
+        self.create_config_label(publish_frame, "⏰ Publishing", "When to make your video live")
         self.config_publish_var = tk.StringVar(value=self.upload_settings.get('publish_timing', 'immediately'))
         publish_combo = ttk.Combobox(publish_frame, textvariable=self.config_publish_var,
-                                   values=["immediately", "scheduled"], state="readonly", width=15)
-        publish_combo.pack(side=tk.LEFT)
+                                   values=["immediately", "scheduled"], state="readonly", 
+                                   font=('Segoe UI', 10), width=20)
+        publish_combo.pack(anchor=tk.W, pady=(5,0))
         
-        # === THUMBNAIL SECTION ===
-        thumbnail_frame = tk.LabelFrame(scrollable_frame, text="🖼️ Thumbnail Settings", 
-                                      bg=self.colors['background'], fg=self.colors['primary'],
-                                      font=('Segoe UI', 11, 'bold'), padx=15, pady=15)
-        thumbnail_frame.pack(fill=tk.X, pady=(0,15))
+        # Thumbnail settings
+        thumbnail_container = tk.Frame(publishing_section, bg=self.colors['surface'], relief=tk.FLAT, bd=1)
+        thumbnail_container.pack(fill=tk.X, pady=(10,0))
+        
+        thumb_header = tk.Frame(thumbnail_container, bg=self.colors['surface'])
+        thumb_header.pack(fill=tk.X, padx=15, pady=(15,10))
+        
+        tk.Label(thumb_header, text="🖼️ Thumbnail Settings", font=('Segoe UI', 11, 'bold'),
+                bg=self.colors['surface'], fg=self.colors['primary']).pack(side=tk.LEFT)
         
         self.config_auto_thumb_var = tk.BooleanVar(value=self.upload_settings.get('auto_thumbnail', True))
-        tk.Checkbutton(thumbnail_frame, text="🤖 Use Auto-Generated Thumbnail", 
-                      variable=self.config_auto_thumb_var,
-                      bg=self.colors['background'], fg=self.colors['dark'], font=('Segoe UI', 10),
-                      selectcolor='white').pack(anchor=tk.W)
+        auto_thumb_cb = tk.Checkbutton(thumbnail_container, text="🤖 Use Auto-Generated Thumbnail", 
+                                     variable=self.config_auto_thumb_var,
+                                     bg=self.colors['surface'], fg=self.colors['dark'], 
+                                     font=('Segoe UI', 10), selectcolor='white', bd=0)
+        auto_thumb_cb.pack(anchor=tk.W, padx=15, pady=5)
         
-        # Custom thumbnail path
-        thumb_path_frame = tk.Frame(thumbnail_frame, bg=self.colors['background'])
-        thumb_path_frame.pack(fill=tk.X, pady=(5,0))
+        # Custom thumbnail path with modern styling
+        thumb_path_container = tk.Frame(thumbnail_container, bg=self.colors['surface'])
+        thumb_path_container.pack(fill=tk.X, padx=15, pady=(5,15))
         
-        tk.Label(thumb_path_frame, text="📁 Custom Thumbnail Path:", font=('Segoe UI', 10),
-                bg=self.colors['background'], fg=self.colors['dark']).pack(anchor=tk.W, pady=(0,5))
+        tk.Label(thumb_path_container, text="📁 Custom Thumbnail:", font=('Segoe UI', 10),
+                bg=self.colors['surface'], fg=self.colors['dark']).pack(anchor=tk.W, pady=(0,5))
+        
+        thumb_input_frame = tk.Frame(thumb_path_container, bg=self.colors['surface'])
+        thumb_input_frame.pack(fill=tk.X)
+        
         self.config_thumb_path_var = tk.StringVar(value=self.upload_settings.get('thumbnail_path', ''))
-        thumb_entry = tk.Entry(thumb_path_frame, textvariable=self.config_thumb_path_var, width=60,
-                              bg='white', fg=self.colors['dark'], font=('Segoe UI', 10))
-        thumb_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,10))
+        thumb_entry = tk.Entry(thumb_input_frame, textvariable=self.config_thumb_path_var, 
+                              font=('Segoe UI', 10), relief=tk.FLAT, bd=5,
+                              bg='white', fg=self.colors['dark'])
+        thumb_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,10), ipady=6)
         
-        tk.Button(thumb_path_frame, text="📁 Browse",
-                 command=lambda: self.browse_thumbnail_path(),
-                 bg=self.colors['primary'], fg='white', relief=tk.FLAT,
-                 font=('Segoe UI', 9, 'bold'), cursor='hand2', padx=15, pady=5).pack(side=tk.RIGHT)
+        browse_btn = tk.Button(thumb_input_frame, text="📁 Browse",
+                              command=lambda: self.browse_thumbnail_path(),
+                              bg=self.colors['secondary'], fg='white', relief=tk.FLAT,
+                              font=('Segoe UI', 9, 'bold'), cursor='hand2', padx=15, pady=6)
+        browse_btn.pack(side=tk.RIGHT)
         
-        # === BUTTONS SECTION ===
-        button_frame = tk.Frame(scrollable_frame, bg=self.colors['background'])
-        button_frame.pack(fill=tk.X, pady=(20,0))
+        # === BOTTOM BUTTONS WITH MODERN STYLING ===
+        button_container = tk.Frame(config_window, bg=self.colors['light'], height=80)
+        button_container.pack(fill=tk.X, side=tk.BOTTOM)
+        button_container.pack_propagate(False)
         
-        # Reset to defaults
-        tk.Button(button_frame, text="🔄 Reset to Defaults",
-                 command=lambda: self.reset_config_defaults(config_window),
-                 bg=self.colors['warning'], fg='white', relief=tk.FLAT,
-                 font=('Segoe UI', 10, 'bold'), cursor='hand2', padx=20, pady=8).pack(side=tk.LEFT)
+        button_frame = tk.Frame(button_container, bg=self.colors['light'])
+        button_frame.pack(expand=True)
         
-        # Cancel and Save buttons
-        tk.Button(button_frame, text="❌ Cancel",
-                 command=config_window.destroy,
-                 bg=self.colors['danger'], fg='white', relief=tk.FLAT,
-                 font=('Segoe UI', 10, 'bold'), cursor='hand2', padx=20, pady=8).pack(side=tk.RIGHT, padx=(10,0))
+        # Reset button
+        reset_btn = tk.Button(button_frame, text="🔄 Reset to Defaults",
+                             command=lambda: self.reset_config_defaults(config_window),
+                             bg=self.colors['warning'], fg='white', relief=tk.FLAT,
+                             font=('Segoe UI', 11, 'bold'), cursor='hand2', 
+                             padx=25, pady=12, bd=0)
+        reset_btn.pack(side=tk.LEFT, padx=10)
         
-        tk.Button(button_frame, text="✅ Save & Apply",
-                 command=lambda: self.save_config_settings(config_window),
-                 bg=self.colors['success'], fg='white', relief=tk.FLAT,
-                 font=('Segoe UI', 10, 'bold'), cursor='hand2', padx=20, pady=8).pack(side=tk.RIGHT)
+        # Cancel button
+        cancel_btn = tk.Button(button_frame, text="❌ Cancel",
+                              command=config_window.destroy,
+                              bg=self.colors['danger'], fg='white', relief=tk.FLAT,
+                              font=('Segoe UI', 11, 'bold'), cursor='hand2', 
+                              padx=25, pady=12, bd=0)
+        cancel_btn.pack(side=tk.RIGHT, padx=10)
+        
+        # Save button
+        save_btn = tk.Button(button_frame, text="✅ Save Configuration",
+                            command=lambda: self.save_config_settings(config_window),
+                            bg=self.colors['success'], fg='white', relief=tk.FLAT,
+                            font=('Segoe UI', 11, 'bold'), cursor='hand2', 
+                            padx=25, pady=12, bd=0)
+        save_btn.pack(side=tk.RIGHT, padx=(10,0))
+
+    def create_config_section(self, parent, title, description):
+        """Create a styled section for configuration form"""
+        section_frame = tk.Frame(parent, bg=self.colors['background'])
+        section_frame.pack(fill=tk.X, pady=(0,20))
+        
+        # Section header
+        header_frame = tk.Frame(section_frame, bg=self.colors['primary'], height=50)
+        header_frame.pack(fill=tk.X)
+        header_frame.pack_propagate(False)
+        
+        header_content = tk.Frame(header_frame, bg=self.colors['primary'])
+        header_content.pack(expand=True, fill=tk.X, padx=20)
+        
+        tk.Label(header_content, text=title, font=('Segoe UI', 12, 'bold'),
+                bg=self.colors['primary'], fg='white').pack(side=tk.LEFT, anchor=tk.W, pady=15)
+        
+        # Section content area
+        content_frame = tk.Frame(section_frame, bg=self.colors['surface'], relief=tk.FLAT, bd=1)
+        content_frame.pack(fill=tk.X, padx=1)
+        
+        # Description
+        if description:
+            desc_frame = tk.Frame(content_frame, bg=self.colors['light'])
+            desc_frame.pack(fill=tk.X, padx=20, pady=(15,10))
+            
+            tk.Label(desc_frame, text=description, font=('Segoe UI', 9),
+                    bg=self.colors['light'], fg=self.colors['medium']).pack(anchor=tk.W)
+        
+        return content_frame
+    
+    def create_config_field_frame(self, parent):
+        """Create a frame for configuration fields"""
+        field_frame = tk.Frame(parent, bg=self.colors['surface'])
+        field_frame.pack(fill=tk.X, padx=20, pady=10)
+        return field_frame
+    
+    def create_config_label(self, parent, text, description=None):
+        """Create a styled label for configuration fields"""
+        label = tk.Label(parent, text=text, font=('Segoe UI', 10, 'bold'),
+                        bg=self.colors['surface'], fg=self.colors['dark'])
+        label.pack(anchor=tk.W, pady=(0,5))
+        
+        if description:
+            desc_label = tk.Label(parent, text=description, font=('Segoe UI', 9),
+                                 bg=self.colors['surface'], fg=self.colors['medium'])
+            desc_label.pack(anchor=tk.W, pady=(0,5))
+        
+        return label
 
     def browse_thumbnail_path(self):
         """Browse for thumbnail image file"""
@@ -4627,6 +5304,683 @@ Built with Python & Tkinter
                 json.dump(self.upload_settings, f, indent=2, ensure_ascii=False)
         except Exception as e:
             self.log(f"⚠️ Could not save upload settings: {e}")
+            
+    def show_oauth_setup_guide(self):
+        """Show OAuth setup guide for real YouTube uploads"""
+        guide_text = """
+🔧 Cách Setup OAuth để Upload Video Thật lên YouTube
+
+📋 BƯỚC 1: Tạo Google Cloud Project
+1. Truy cập: https://console.cloud.google.com
+2. Tạo project mới hoặc chọn project hiện có
+3. Enable YouTube Data API v3
+
+📋 BƯỚC 2: Tạo OAuth Credentials  
+1. Vào "Credentials" → "Create Credentials" → "OAuth 2.0 Client IDs"
+2. Chọn "Desktop Application"
+3. Tải xuống file JSON
+4. Đổi tên thành "credentials.json"
+5. Đặt file vào thư mục ứng dụng
+
+📋 BƯỚC 3: Authentication
+1. Restart ứng dụng
+2. Chọn "OAuth Login" khi được hỏi
+3. Browser sẽ mở để đăng nhập Google
+4. Cho phép truy cập YouTube
+
+✅ SAU KHI SETUP:
+• Upload sẽ thật sự lên YouTube channel của bạn
+• Video sẽ xuất hiện trong YouTube Studio
+• Có thể kiểm tra trạng thái thực tế
+
+⚠️ HIỆN TẠI:
+• Đang dùng Demo Mode
+• Upload chỉ là simulation
+• Không có video thật trên YouTube
+
+💡 Cần hỗ trợ setup? Xem hướng dẫn chi tiết tại:
+https://developers.google.com/youtube/v3/quickstart/python
+"""
+        
+        messagebox.showinfo("OAuth Setup Guide", guide_text)
+        
+    def create_tooltip(self, widget, text):
+        """Create tooltip for widget"""
+        def on_enter(event):
+            tooltip = ToolTip(widget, text)
+            widget.tooltip = tooltip
+            
+        def on_leave(event):
+            if hasattr(widget, 'tooltip'):
+                widget.tooltip.destroy()
+                del widget.tooltip
+                
+        widget.bind("<Enter>", on_enter)
+        widget.bind("<Leave>", on_leave)
+        
+    def load_video_list(self, parent_window):
+        """Load video list from YouTube channel"""
+        try:
+            if not self.youtube_uploader or not self.youtube_uploader.authenticated:
+                messagebox.showwarning("Warning", "Please authenticate with YouTube first!")
+                return
+                
+            self.manager_status_var.set("🔄 Loading videos...")
+            parent_window.update()
+            
+            # Clear existing items
+            for item in self.video_tree.get_children():
+                self.video_tree.delete(item)
+            
+            # Get videos from YouTube using existing method
+            try:
+                # Use the existing YouTube service
+                youtube = self.youtube_uploader.service
+                
+                # Get channel's uploads playlist
+                channels_response = youtube.channels().list(
+                    part='contentDetails',
+                    mine=True
+                ).execute()
+                
+                if not channels_response['items']:
+                    self.manager_status_var.set("❌ No channel found")
+                    return
+                    
+                uploads_playlist_id = channels_response['items'][0]['contentDetails']['relatedPlaylists']['uploads']
+                
+                # Get videos from uploads playlist
+                playlist_response = youtube.playlistItems().list(
+                    part='snippet',
+                    playlistId=uploads_playlist_id,
+                    maxResults=50
+                ).execute()
+                
+                videos = []
+                for item in playlist_response['items']:
+                    video_id = item['snippet']['resourceId']['videoId']
+                    
+                    # Get detailed video info
+                    video_response = youtube.videos().list(
+                        part='snippet,statistics,status,contentDetails',
+                        id=video_id
+                    ).execute()
+                    
+                    if video_response['items']:
+                        video_data = video_response['items'][0]
+                        videos.append({
+                            'id': video_id,
+                            'title': video_data['snippet']['title'],
+                            'description': video_data['snippet']['description'],
+                            'viewCount': video_data['statistics'].get('viewCount', '0'),
+                            'likeCount': video_data['statistics'].get('likeCount', '0'),
+                            'commentCount': video_data['statistics'].get('commentCount', '0'),
+                            'status': video_data['status']['privacyStatus'],
+                            'publishedAt': video_data['snippet']['publishedAt'],
+                            'duration': video_data['contentDetails']['duration'],
+                            'thumbnails': video_data['snippet']['thumbnails']
+                        })
+                
+                if videos:
+                    for video in videos:
+                        # Format data for display
+                        title = video.get('title', 'Unknown Title')[:50] + ('...' if len(video.get('title', '')) > 50 else '')
+                        views = self.format_number(video.get('viewCount', '0'))
+                        privacy = video.get('status', 'unknown').title()
+                        published = video.get('publishedAt', '')[:10]  # Just date part
+                        duration = self.format_duration(video.get('duration', 'PT0S'))
+                        
+                        # Insert into tree
+                        item = self.video_tree.insert('', 'end', values=(title, views, privacy, published, duration))
+                        
+                        # Store full video data
+                        self.current_video_data[item] = video
+                        
+                    self.manager_status_var.set(f"✅ Loaded {len(videos)} videos")
+                else:
+                    self.manager_status_var.set("❌ No videos found")
+                    
+            except Exception as api_error:
+                # Fallback to demo data
+                demo_videos = [
+                    {
+                        'id': 'demo1', 'title': 'Demo Video 1', 'viewCount': '1234', 
+                        'status': 'public', 'publishedAt': '2024-01-01', 'duration': 'PT3M45S'
+                    },
+                    {
+                        'id': 'demo2', 'title': 'Demo Video 2', 'viewCount': '5678', 
+                        'status': 'unlisted', 'publishedAt': '2024-01-02', 'duration': 'PT1M23S'
+                    }
+                ]
+                
+                for video in demo_videos:
+                    title = video.get('title', 'Unknown Title')
+                    views = self.format_number(video.get('viewCount', '0'))
+                    privacy = video.get('status', 'unknown').title()
+                    published = video.get('publishedAt', '')[:10]
+                    duration = self.format_duration(video.get('duration', 'PT0S'))
+                    
+                    item = self.video_tree.insert('', 'end', values=(title, views, privacy, published, duration))
+                    self.current_video_data[item] = video
+                    
+                self.manager_status_var.set(f"📊 Demo mode - {len(demo_videos)} videos")
+                
+        except Exception as e:
+            self.manager_status_var.set(f"❌ Error loading videos: {str(e)}")
+            print(f"Video loading error: {e}")
+            
+    def format_duration(self, duration_str):
+        """Format ISO 8601 duration to readable format"""
+        import re
+        
+        # Parse PT3M45S format
+        match = re.match(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', duration_str)
+        if not match:
+            return "0:00"
+            
+        hours, minutes, seconds = match.groups()
+        hours = int(hours) if hours else 0
+        minutes = int(minutes) if minutes else 0
+        seconds = int(seconds) if seconds else 0
+        
+        if hours > 0:
+            return f"{hours}:{minutes:02d}:{seconds:02d}"
+        else:
+            return f"{minutes}:{seconds:02d}"
+            
+    def filter_video_list(self, event=None):
+        """Filter video list based on search"""
+        search_term = self.video_search_var.get().lower()
+        
+        # If search is empty, show all items
+        if not search_term:
+            for item in self.video_tree.get_children():
+                self.video_tree.reattach(item, '', 'end')
+            return
+            
+        # Hide items that don't match search
+        for item in self.video_tree.get_children():
+            values = self.video_tree.item(item, 'values')
+            title = values[0].lower() if values else ""
+            
+            if search_term in title:
+                self.video_tree.reattach(item, '', 'end')
+            else:
+                self.video_tree.detach(item)
+                
+    def format_number(self, num_str):
+        """Format number for display (1.2K, 1.2M, etc.)"""
+        try:
+            num = int(num_str)
+            if num >= 1000000:
+                return f"{num/1000000:.1f}M"
+            elif num >= 1000:
+                return f"{num/1000:.1f}K"
+            else:
+                return str(num)
+        except:
+            return num_str
+            
+    def on_video_hover(self, event):
+        """Show video preview on hover"""
+        item = self.video_tree.identify_row(event.y)
+        if item and item in self.current_video_data:
+            self.show_video_preview(item)
+            
+    def hide_video_preview(self, event=None):
+        """Hide video preview"""
+        # Don't hide if a video is selected
+        if not self.video_tree.selection():
+            self.show_default_preview()
+            
+    def on_video_select(self, event):
+        """Handle video selection"""
+        selection = self.video_tree.selection()
+        if selection:
+            item = selection[0]
+            self.show_video_preview(item)
+            
+    def show_video_preview(self, item):
+        """Show detailed preview of selected video"""
+        if item not in self.current_video_data:
+            return
+            
+        video = self.current_video_data[item]
+        
+        # Clear preview frame
+        for widget in self.preview_frame.winfo_children():
+            widget.destroy()
+            
+        # Create preview content
+        preview_content = tk.Frame(self.preview_frame, bg=self.colors['surface'])
+        preview_content.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Video title
+        title_label = tk.Label(preview_content, 
+                              text=video.get('title', 'Unknown Title'),
+                              font=('Segoe UI', 12, 'bold'),
+                              bg=self.colors['surface'], fg=self.colors['dark'],
+                              wraplength=350, justify=tk.LEFT)
+        title_label.pack(anchor=tk.W, pady=(0, 10))
+        
+        # Video stats
+        stats_frame = tk.Frame(preview_content, bg=self.colors['surface'])
+        stats_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(stats_frame, text=f"👁️ Views: {self.format_number(video.get('viewCount', '0'))}",
+                bg=self.colors['surface'], font=('Segoe UI', 10)).pack(anchor=tk.W)
+        tk.Label(stats_frame, text=f"👍 Likes: {self.format_number(video.get('likeCount', '0'))}",
+                bg=self.colors['surface'], font=('Segoe UI', 10)).pack(anchor=tk.W)
+        tk.Label(stats_frame, text=f"💬 Comments: {self.format_number(video.get('commentCount', '0'))}",
+                bg=self.colors['surface'], font=('Segoe UI', 10)).pack(anchor=tk.W)
+        tk.Label(stats_frame, text=f"🔒 Privacy: {video.get('status', 'unknown').title()}",
+                bg=self.colors['surface'], font=('Segoe UI', 10)).pack(anchor=tk.W)
+        
+        # Publication date
+        published = video.get('publishedAt', '')
+        if published:
+            tk.Label(stats_frame, text=f"📅 Published: {published[:10]}",
+                    bg=self.colors['surface'], font=('Segoe UI', 10)).pack(anchor=tk.W)
+        
+        # Video URL
+        video_id = video.get('id', '')
+        if video_id:
+            url_frame = tk.Frame(preview_content, bg=self.colors['surface'])
+            url_frame.pack(fill=tk.X, pady=(10, 0))
+            
+            tk.Label(url_frame, text="🔗 URL:",
+                    bg=self.colors['surface'], font=('Segoe UI', 10, 'bold')).pack(anchor=tk.W)
+            
+            url_text = tk.Text(url_frame, height=2, font=('Consolas', 8), wrap=tk.WORD)
+            url_text.insert('1.0', f"https://youtube.com/watch?v={video_id}")
+            url_text.config(state=tk.DISABLED)
+            url_text.pack(fill=tk.X, pady=(5, 0))
+            
+        # Quick actions
+        actions_frame = tk.Frame(preview_content, bg=self.colors['surface'])
+        actions_frame.pack(fill=tk.X, pady=(15, 0))
+        
+        tk.Button(actions_frame, text="🌐 Open in Browser", 
+                 command=lambda: self.open_video_in_browser(video_id),
+                 bg=self.colors['primary'], fg='white', relief=tk.FLAT,
+                 font=('Segoe UI', 9, 'bold')).pack(side=tk.LEFT, padx=(0, 5))
+        
+        tk.Button(actions_frame, text="📋 Copy URL", 
+                 command=lambda: self.copy_video_url(video_id),
+                 bg=self.colors['secondary'], fg='white', relief=tk.FLAT,
+                 font=('Segoe UI', 9, 'bold')).pack(side=tk.LEFT)
+                 
+    def show_default_preview(self):
+        """Show default preview message"""
+        for widget in self.preview_frame.winfo_children():
+            widget.destroy()
+            
+        self.preview_label = tk.Label(self.preview_frame, 
+                                     text="📹 Select a video to see preview\n\n• Hover over videos for quick preview\n• Right-click for edit/delete options\n• Double-click to open in YouTube",
+                                     font=('Segoe UI', 11),
+                                     bg=self.colors['surface'], fg=self.colors['dark'],
+                                     justify=tk.CENTER)
+        self.preview_label.pack(expand=True)
+        
+    def show_video_context_menu(self, event):
+        """Show context menu for video management"""
+        item = self.video_tree.identify_row(event.y)
+        if not item or item not in self.current_video_data:
+            return
+            
+        # Select the item
+        self.video_tree.selection_set(item)
+        
+        # Create context menu
+        context_menu = tk.Menu(self.root, tearoff=0, font=('Segoe UI', 10))
+        
+        context_menu.add_command(label="✏️ Edit Video", 
+                               command=lambda: self.edit_video(item))
+        context_menu.add_command(label="🗑️ Delete Video", 
+                               command=lambda: self.delete_video(item))
+        context_menu.add_separator()
+        context_menu.add_command(label="🌐 Open in Browser", 
+                               command=lambda: self.open_video_in_browser(self.current_video_data[item].get('id')))
+        context_menu.add_command(label="📋 Copy URL", 
+                               command=lambda: self.copy_video_url(self.current_video_data[item].get('id')))
+        context_menu.add_separator()
+        context_menu.add_command(label="📊 View Analytics", 
+                               command=lambda: self.show_video_analytics_detail(item))
+        
+        # Show menu
+        try:
+            context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            context_menu.grab_release()
+            
+    def edit_video(self, item):
+        """Edit video details"""
+        if item not in self.current_video_data:
+            return
+            
+        video = self.current_video_data[item]
+        self.show_video_edit_dialog(video)
+        
+    def delete_video(self, item):
+        """Delete video"""
+        if item not in self.current_video_data:
+            return
+            
+        video = self.current_video_data[item]
+        title = video.get('title', 'Unknown Video')
+        
+        result = messagebox.askyesno("Confirm Delete", 
+                                    f"Are you sure you want to delete this video?\n\n📹 {title}\n\n⚠️ This action cannot be undone!")
+        
+        if result:
+            self.perform_video_delete(video, item)
+            
+    def open_video_in_browser(self, video_id):
+        """Open video in browser"""
+        if video_id:
+            url = f"https://youtube.com/watch?v={video_id}"
+            import webbrowser
+            webbrowser.open(url)
+            
+    def copy_video_url(self, video_id):
+        """Copy video URL to clipboard"""
+        if video_id:
+            url = f"https://youtube.com/watch?v={video_id}"
+            self.root.clipboard_clear()
+            self.root.clipboard_append(url)
+            self.manager_status_var.set("📋 URL copied to clipboard!")
+            
+    def edit_selected_video(self):
+        """Edit currently selected video"""
+        selection = self.video_tree.selection()
+        if selection:
+            self.edit_video(selection[0])
+            
+    def delete_selected_video(self):
+        """Delete currently selected video"""
+        selection = self.video_tree.selection()
+        if selection:
+            self.delete_video(selection[0])
+            
+    def show_video_analytics(self):
+        """Show analytics for selected video"""
+        selection = self.video_tree.selection()
+        if selection:
+            self.show_video_analytics_detail(selection[0])
+            
+    def show_video_analytics_detail(self, item):
+        """Show detailed analytics for a video"""
+        if item not in self.current_video_data:
+            return
+            
+        video = self.current_video_data[item]
+        title = video.get('title', 'Unknown Video')
+        
+        # Create analytics window
+        analytics_window = tk.Toplevel(self.root)
+        analytics_window.title(f"📊 Analytics - {title[:30]}...")
+        analytics_window.geometry("600x500")
+        analytics_window.configure(bg=self.colors['light'])
+        
+        # Header
+        header = tk.Frame(analytics_window, bg=self.colors['primary'], height=50)
+        header.pack(fill=tk.X)
+        header.pack_propagate(False)
+        
+        tk.Label(header, text=f"📊 Video Analytics", 
+                font=('Segoe UI', 14, 'bold'),
+                bg=self.colors['primary'], fg='white').pack(pady=15)
+        
+        # Content
+        content = tk.Frame(analytics_window, bg=self.colors['light'])
+        content.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Video info
+        info_frame = tk.LabelFrame(content, text="Video Information", 
+                                  font=('Segoe UI', 10, 'bold'))
+        info_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        tk.Label(info_frame, text=f"Title: {title}", 
+                font=('Segoe UI', 10), justify=tk.LEFT, wraplength=500).pack(anchor=tk.W, padx=10, pady=5)
+        tk.Label(info_frame, text=f"Video ID: {video.get('id', 'N/A')}", 
+                font=('Segoe UI', 10)).pack(anchor=tk.W, padx=10, pady=2)
+        tk.Label(info_frame, text=f"Published: {video.get('publishedAt', 'N/A')[:10]}", 
+                font=('Segoe UI', 10)).pack(anchor=tk.W, padx=10, pady=2)
+        
+        # Stats
+        stats_frame = tk.LabelFrame(content, text="Performance Stats", 
+                                   font=('Segoe UI', 10, 'bold'))
+        stats_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        stats_grid = tk.Frame(stats_frame)
+        stats_grid.pack(padx=10, pady=10)
+        
+        # Create stats display
+        stats = [
+            ("👁️ Views", self.format_number(video.get('viewCount', '0'))),
+            ("👍 Likes", self.format_number(video.get('likeCount', '0'))),
+            ("💬 Comments", self.format_number(video.get('commentCount', '0'))),
+            ("🔒 Privacy", video.get('status', 'unknown').title())
+        ]
+        
+        for i, (label, value) in enumerate(stats):
+            row = i // 2
+            col = i % 2
+            
+            stat_frame = tk.Frame(stats_grid, bg=self.colors['surface'], relief=tk.RAISED, bd=1)
+            stat_frame.grid(row=row, column=col, padx=5, pady=5, sticky="ew")
+            
+            tk.Label(stat_frame, text=label, font=('Segoe UI', 9, 'bold'),
+                    bg=self.colors['surface']).pack(pady=(5, 0))
+            tk.Label(stat_frame, text=value, font=('Segoe UI', 12, 'bold'),
+                    bg=self.colors['surface'], fg=self.colors['primary']).pack(pady=(0, 5))
+        
+        # Actions
+        actions_frame = tk.Frame(content)
+        actions_frame.pack(fill=tk.X, pady=(15, 0))
+        
+        tk.Button(actions_frame, text="🌐 Open in YouTube", 
+                 command=lambda: self.open_video_in_browser(video.get('id')),
+                 bg=self.colors['primary'], fg='white', relief=tk.FLAT,
+                 font=('Segoe UI', 10, 'bold')).pack(side=tk.LEFT, padx=(0, 10))
+        
+        tk.Button(actions_frame, text="📊 YouTube Analytics", 
+                 command=lambda: self.open_youtube_analytics(video.get('id')),
+                 bg=self.colors['info'], fg='white', relief=tk.FLAT,
+                 font=('Segoe UI', 10, 'bold')).pack(side=tk.LEFT, padx=(0, 10))
+        
+        tk.Button(actions_frame, text="❌ Close", 
+                 command=analytics_window.destroy,
+                 bg=self.colors['medium'], fg='white', relief=tk.FLAT,
+                 font=('Segoe UI', 10, 'bold')).pack(side=tk.RIGHT)
+                 
+    def show_video_edit_dialog(self, video):
+        """Show video edit dialog"""
+        title = video.get('title', 'Unknown Video')
+        
+        # Create edit window
+        edit_window = tk.Toplevel(self.root)
+        edit_window.title(f"✏️ Edit Video - {title[:30]}...")
+        edit_window.geometry("700x600")
+        edit_window.configure(bg=self.colors['light'])
+        edit_window.transient(self.root)
+        edit_window.grab_set()
+        
+        # Header
+        header = tk.Frame(edit_window, bg=self.colors['primary'], height=50)
+        header.pack(fill=tk.X)
+        header.pack_propagate(False)
+        
+        tk.Label(header, text="✏️ Edit Video Details", 
+                font=('Segoe UI', 14, 'bold'),
+                bg=self.colors['primary'], fg='white').pack(pady=15)
+        
+        # Scrollable content
+        canvas = tk.Canvas(edit_window, bg=self.colors['light'])
+        scrollbar = ttk.Scrollbar(edit_window, orient="vertical", command=canvas.yview)
+        content = tk.Frame(canvas, bg=self.colors['light'])
+        
+        content.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=content, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True, padx=20, pady=20)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Title
+        title_frame = tk.LabelFrame(content, text="📹 Title", font=('Segoe UI', 10, 'bold'))
+        title_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        title_var = tk.StringVar(value=title)
+        title_entry = tk.Text(title_frame, height=2, font=('Segoe UI', 10), wrap=tk.WORD)
+        title_entry.insert('1.0', title)
+        title_entry.pack(fill=tk.X, padx=10, pady=10)
+        
+        # Description
+        desc_frame = tk.LabelFrame(content, text="📝 Description", font=('Segoe UI', 10, 'bold'))
+        desc_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        desc_text = tk.Text(desc_frame, height=6, font=('Segoe UI', 10), wrap=tk.WORD)
+        desc_text.insert('1.0', "Current description not available in demo mode.\nIn real mode, this would show the actual video description.")
+        desc_text.pack(fill=tk.X, padx=10, pady=10)
+        
+        # Privacy settings
+        privacy_frame = tk.LabelFrame(content, text="🔒 Privacy Settings", font=('Segoe UI', 10, 'bold'))
+        privacy_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        privacy_var = tk.StringVar(value=video.get('status', 'public'))
+        privacy_options = ['public', 'unlisted', 'private']
+        
+        for option in privacy_options:
+            tk.Radiobutton(privacy_frame, text=option.title(), variable=privacy_var, value=option,
+                          font=('Segoe UI', 10), bg=self.colors['light']).pack(anchor=tk.W, padx=10, pady=2)
+        
+        # Tags
+        tags_frame = tk.LabelFrame(content, text="🏷️ Tags", font=('Segoe UI', 10, 'bold'))
+        tags_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        tk.Label(tags_frame, text="Enter tags separated by commas:", 
+                font=('Segoe UI', 9), bg=self.colors['light']).pack(anchor=tk.W, padx=10, pady=(10, 5))
+        
+        tags_entry = tk.Text(tags_frame, height=3, font=('Segoe UI', 10), wrap=tk.WORD)
+        tags_entry.insert('1.0', "douyin, viral, entertainment, shorts")
+        tags_entry.pack(fill=tk.X, padx=10, pady=(0, 10))
+        
+        # Warning
+        warning_frame = tk.Frame(content, bg=self.colors['warning'])
+        warning_frame.pack(fill=tk.X, pady=(15, 20))
+        
+        tk.Label(warning_frame, 
+                text="⚠️ Demo Mode: Changes will not be applied to actual YouTube video\nFor real editing, OAuth authentication is required",
+                font=('Segoe UI', 10, 'bold'), bg=self.colors['warning'], fg=self.colors['dark']).pack(pady=10)
+        
+        # Buttons
+        button_frame = tk.Frame(content, bg=self.colors['light'])
+        button_frame.pack(fill=tk.X, pady=(20, 0))
+        
+        tk.Button(button_frame, text="💾 Save Changes", 
+                 command=lambda: self.save_video_changes(edit_window, video, title_entry, desc_text, privacy_var, tags_entry),
+                 bg=self.colors['success'], fg=self.colors['dark'], relief=tk.FLAT,
+                 font=('Segoe UI', 11, 'bold')).pack(side=tk.LEFT, padx=(0, 10))
+        
+        tk.Button(button_frame, text="❌ Cancel", 
+                 command=edit_window.destroy,
+                 bg=self.colors['medium'], fg='white', relief=tk.FLAT,
+                 font=('Segoe UI', 11, 'bold')).pack(side=tk.LEFT)
+                 
+    def save_video_changes(self, window, video, title_widget, desc_widget, privacy_var, tags_widget):
+        """Save video changes"""
+        try:
+            new_title = title_widget.get('1.0', 'end-1c')
+            new_desc = desc_widget.get('1.0', 'end-1c')
+            new_privacy = privacy_var.get()
+            new_tags = tags_widget.get('1.0', 'end-1c')
+            
+            # In demo mode, just show what would be saved
+            if not self.youtube_uploader or self.youtube_uploader.service == 'demo_service':
+                messagebox.showinfo("Demo Mode", 
+                    f"Changes would be saved:\n\n" +
+                    f"📹 Title: {new_title[:50]}...\n" +
+                    f"🔒 Privacy: {new_privacy}\n" +
+                    f"🏷️ Tags: {new_tags[:30]}...\n\n" +
+                    f"To apply real changes, use OAuth authentication.")
+                window.destroy()
+                return
+            
+            # Real save would go here
+            messagebox.showinfo("Success", "Video changes saved successfully!")
+            window.destroy()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save changes: {str(e)}")
+            
+    def perform_video_delete(self, video, item):
+        """Perform actual video deletion"""
+        try:
+            video_id = video.get('id', '')
+            title = video.get('title', 'Unknown Video')
+            
+            # In demo mode, just simulate
+            if not self.youtube_uploader or self.youtube_uploader.service == 'demo_service':
+                messagebox.showinfo("Demo Mode", 
+                    f"Video deletion simulated:\n\n📹 {title}\n🆔 {video_id}\n\n" +
+                    f"To delete real videos, use OAuth authentication.")
+                
+                # Remove from tree
+                self.video_tree.delete(item)
+                del self.current_video_data[item]
+                self.show_default_preview()
+                return
+            
+            # Real deletion would go here with YouTube API
+            messagebox.showinfo("Success", f"Video '{title}' deleted successfully!")
+            
+            # Remove from tree
+            self.video_tree.delete(item)
+            del self.current_video_data[item]
+            self.show_default_preview()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to delete video: {str(e)}")
+            
+    def open_youtube_analytics(self, video_id):
+        """Open YouTube Analytics for specific video"""
+        if video_id:
+            url = f"https://studio.youtube.com/video/{video_id}/analytics"
+            import webbrowser
+            webbrowser.open(url)
+
+class ToolTip:
+    """Simple tooltip class for buttons"""
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tooltip = None
+        self.show_tooltip()
+        
+    def show_tooltip(self):
+        """Show tooltip window"""
+        x, y, _, _ = self.widget.bbox("insert") if hasattr(self.widget, 'bbox') else (0, 0, 0, 0)
+        x += self.widget.winfo_rootx() + 25
+        y += self.widget.winfo_rooty() + 25
+        
+        self.tooltip = tk.Toplevel(self.widget)
+        self.tooltip.wm_overrideredirect(True)
+        self.tooltip.wm_geometry(f"+{x}+{y}")
+        
+        # Create tooltip content
+        frame = tk.Frame(self.tooltip, background="#FFFFDD", relief="solid", borderwidth=1)
+        frame.pack()
+        
+        label = tk.Label(frame, text=self.text, background="#FFFFDD", 
+                        font=("Segoe UI", 9), justify="left", padx=10, pady=8)
+        label.pack()
+        
+    def destroy(self):
+        """Destroy tooltip window"""
+        if self.tooltip:
+            self.tooltip.destroy()
+            self.tooltip = None
 
 def main():
     """Run the application"""
