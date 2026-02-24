@@ -222,3 +222,5 @@ desktop.ini
 douyin_downloads/
 youtube_uploads/
 processed_videos/
+last_douyin_profile.json
+.tmp_check.py

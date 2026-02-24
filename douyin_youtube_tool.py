@@ -40,9 +40,18 @@ try:
     import browser_cookie3
 except ImportError:
     browser_cookie3 = None
+import sqlite3
+import shutil
+import base64
+import json as json_lib
+from pathlib import Path
+
+try:
+    from Crypto.Cipher import AES  # pycryptodomex
+except ImportError:
+    AES = None
 
 # Check YouTube API availability
-=======
 # Third-party imports
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, scrolledtext, simpledialog
@@ -963,74 +972,37 @@ class DouyinYouTubeTool:
         # Header
         self.create_header(main_container)
         
-        # Custom tab bar with better visibility and spacing
+        # Tab container using ttk.Notebook for clear separation Douyin vs YouTube
         tab_container = ttk.Frame(main_container)
-        tab_container.pack(fill=tk.X, pady=(20, 0))
-        
-        # Custom tab buttons for better control
-        tab_button_frame = ttk.Frame(tab_container)
-        tab_button_frame.pack(pady=10)
-        
-        # Create custom tab buttons
-        self.current_tab = tk.StringVar(value="download")
-        
-        self.download_tab_btn = tk.Button(tab_button_frame,
-                                         text="  📥  Download Videos  ",
-                                         command=lambda: self.switch_tab("download"),
-                                         bg=self.colors['primary'], fg='white',
-                                         font=('Segoe UI', 12, 'bold'),
-                                         relief='flat', padx=25, pady=12,
-                                         activebackground='#357ABD',
-                                         activeforeground='white')
-        self.download_tab_btn.pack(side=tk.LEFT, padx=(0, 15))
-        
-        self.upload_tab_btn = tk.Button(tab_button_frame,
-                                       text="  📤  Upload to YouTube  ",
-                                       command=lambda: self.switch_tab("upload"),
-                                       bg=self.colors['medium'], fg='white',
-                                       font=('Segoe UI', 12, 'bold'),
-                                       relief='flat', padx=25, pady=12,
-                                       activebackground=self.colors['secondary'],
-                                       activeforeground='white')
-        self.upload_tab_btn.pack(side=tk.LEFT, padx=(15, 0))
-        
-        # Content container
-        self.content_container = ttk.Frame(tab_container)
-        self.content_container.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
-        
-        # Create tabs with new system
+        tab_container.pack(fill=tk.BOTH, expand=True, pady=(20, 0))
+
+        self.content_container = ttk.Notebook(tab_container)
+        self.content_container.pack(fill=tk.BOTH, expand=True)
+
+        # Create tab contents
         self.create_download_tab()
         self.create_upload_tab()
-        
-        # Start with download tab
-        self.switch_tab("download")
+
+        # Add tabs to notebook
+        self.content_container.add(self.download_frame, text="📥 Douyin Downloader")
+        self.content_container.add(self.upload_frame, text="📤 YouTube Uploader")
+        self.content_container.enable_traversal()
+        self.content_container.bind("<<NotebookTabChanged>>", self.on_tab_changed)
         
         # Footer
         self.create_footer(main_container)
-        
-    def switch_tab(self, tab_name):
-        """Switch between custom tabs"""
-        self.current_tab.set(tab_name)
-        
-        # Update button styles
-        if tab_name == "download":
-            self.download_tab_btn.config(bg=self.colors['primary'])
-            self.upload_tab_btn.config(bg=self.colors['medium'])
-            # Show download frame, hide upload frame
-            self.download_frame.pack(fill=tk.BOTH, expand=True)
-            self.upload_frame.pack_forget()
-        else:
-            self.download_tab_btn.config(bg=self.colors['medium'])
-            self.upload_tab_btn.config(bg=self.colors['primary'])
-            # Show upload frame, hide download frame
-            self.upload_frame.pack(fill=tk.BOTH, expand=True)
-            self.download_frame.pack_forget()
-            
-            # Auto-login for YouTube
+
+    def on_tab_changed(self, event=None):
+        """Handle tab changes; auto-auth YouTube when entering uploader tab"""
+        try:
+            current = self.content_container.tab(self.content_container.select(), "text")
+        except Exception:
+            return
+
+        if "YouTube" in current:
             if YOUTUBE_AVAILABLE and self.youtube_uploader:
                 if not self.youtube_uploader.youtube:
                     self.log("🔐 Auto-authenticating with YouTube OAuth...")
-                    # Auto OAuth login
                     self.auto_oauth_login()
                 else:
                     self.log("✅ Already authenticated with YouTube")
@@ -1226,9 +1198,8 @@ class DouyinYouTubeTool:
         self.global_progress.pack(side=tk.RIGHT)
         
     def create_download_tab(self):
-        """Create colorful download tab"""
+        """Create colorful download tab (Douyin downloader)"""
         self.download_frame = ttk.Frame(self.content_container)
-        # Don't pack it yet, will be handled by switch_tab
         
         main_frame = ttk.Frame(self.download_frame, padding="20")
         main_frame.pack(fill=tk.BOTH, expand=True)
@@ -1429,7 +1400,7 @@ class DouyinYouTubeTool:
         
         # Treeview (Improved columns)
         columns = ('Select', 'Index', 'Status', 'Title', 'URL')
-        self.video_tree = ttk.Treeview(list_frame, columns=columns, show='headings', height=8)
+        self.video_tree = ttk.Treeview(list_frame, columns=columns, show='headings', height=12)
         
         self.video_tree.heading('Select', text='☐')
         self.video_tree.heading('Index', text='#')
@@ -1454,9 +1425,8 @@ class DouyinYouTubeTool:
         v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         
     def create_upload_tab(self):
-        """Create upload tab"""
+        """Create upload tab (YouTube uploader)"""
         self.upload_frame = ttk.Frame(self.content_container)
-        # Don't pack it yet, will be handled by switch_tab
         
         main_frame = ttk.Frame(self.upload_frame, padding="20")
         main_frame.pack(fill=tk.BOTH, expand=True)
@@ -1798,39 +1768,210 @@ class DouyinYouTubeTool:
     def auto_import_douyin_cookies(self):
         """Try to load Douyin cookies from local browsers"""
         if browser_cookie3 is None:
-            messagebox.showerror(
-                "Missing dependency",
-                "browser-cookie3 is not installed.\nRun: pip install browser-cookie3"
-            )
-            return
+            self.log("browser-cookie3 not installed, using built-in cookie reader (Chrome/Edge only).")
+
+        def load_cookie_file(loader_func, cookie_path):
+            """Load a single Chromium cookie DB"""
+            try:
+                return loader_func(cookie_file=cookie_path)
+            except Exception:
+                return None
+
+        def decrypt_chromium_cookie(enc_value, local_state_path):
+            """Decrypt AES-GCM cookie value from Chromium DB"""
+            if not enc_value:
+                return ""
+            if enc_value.startswith(b'v10') or enc_value.startswith(b'v11'):
+                if AES is None:
+                    return ""
+                try:
+                    local_state = json_lib.loads(Path(local_state_path).read_text(encoding="utf-8"))
+                    enc_key = base64.b64decode(local_state["os_crypt"]["encrypted_key"])[5:]
+                    # DPAPI decrypt
+                    import ctypes, ctypes.wintypes
+                    CryptUnprotectData = ctypes.windll.crypt32.CryptUnprotectData
+                    class DATA_BLOB(ctypes.Structure):
+                        _fields_ = [("cbData", ctypes.wintypes.DWORD),
+                                    ("pbData", ctypes.POINTER(ctypes.c_char))]
+                    blob_in = DATA_BLOB(len(enc_key), ctypes.cast(ctypes.create_string_buffer(enc_key), ctypes.POINTER(ctypes.c_char)))
+                    blob_out = DATA_BLOB()
+                    CryptUnprotectData(ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out))
+                    decrypted_key = ctypes.string_at(blob_out.pbData, blob_out.cbData)
+                    iv = enc_value[3:15]
+                    payload = enc_value[15:-16]
+                    tag = enc_value[-16:]
+                    cipher = AES.new(decrypted_key, AES.MODE_GCM, iv)
+                    return cipher.decrypt_and_verify(payload, tag).decode()
+                except Exception:
+                    return ""
+            else:
+                try:
+                    import win32crypt
+                    return win32crypt.CryptUnprotectData(enc_value, None, None, None, 0)[1].decode()
+                except Exception:
+                    return ""
+
+        def read_chromium_cookies(db_path, local_state_path, domains):
+            """Minimal cookie reader without browser_cookie3"""
+            cookies = {}
+            if not os.path.exists(db_path) or not os.path.exists(local_state_path):
+                return cookies
+            # copy to temp to avoid lock
+            tmp = Path(db_path).with_suffix(".tmp")
+            try:
+                shutil.copyfile(db_path, tmp)
+                conn = sqlite3.connect(tmp)
+                cur = conn.cursor()
+                domain_placeholders = ",".join("?" * len(domains))
+                like_clauses = " OR ".join([f"host_key LIKE ?"] * len(domains))
+                params = [f"%{d}%" for d in domains]
+                cur.execute(f"SELECT name, encrypted_value, value, host_key FROM cookies WHERE {like_clauses}", params)
+                for name, enc, val, host in cur.fetchall():
+                    if val:
+                        cookies[name] = val
+                    else:
+                        cookies[name] = decrypt_chromium_cookie(enc, local_state_path)
+                conn.close()
+            except Exception:
+                pass
+            finally:
+                try:
+                    tmp.unlink()
+                except Exception:
+                    pass
+            return cookies
 
         loaders = [
-            ("chrome", browser_cookie3.chrome),
-            ("edge", browser_cookie3.edge),
-            ("firefox", browser_cookie3.firefox),
+            ("chrome", browser_cookie3.chrome if browser_cookie3 else None),
+            ("edge", browser_cookie3.edge if browser_cookie3 else None),
+            ("firefox", browser_cookie3.firefox if browser_cookie3 else None),
         ]
 
         douyin_pairs = {}
         loaded_from = []
 
+        douyin_domains = ['douyin.com', 'iesdouyin.com', 'snssdk.com']
+        last_profile_file = "last_douyin_profile.json"
+        last_profile = None
+        if os.path.exists(last_profile_file):
+            try:
+                last_profile = json.loads(open(last_profile_file, "r", encoding="utf-8").read())
+            except Exception:
+                last_profile = None
+
+        # First try default profiles
         for browser_name, loader in loaders:
+            if loader is None:
+                continue
             try:
                 jar = loader()
                 count_before = len(douyin_pairs)
                 for cookie in jar:
                     domain = getattr(cookie, 'domain', '') or ''
-                    if 'douyin.com' in domain:
+                    if any(key in domain for key in douyin_domains):
                         douyin_pairs[cookie.name] = cookie.value
                 if len(douyin_pairs) > count_before:
-                    loaded_from.append(browser_name)
+                    loaded_from.append(f"{browser_name}:Default")
+                self.log(f"Auto Cookie: {browser_name} default found {len(douyin_pairs)-count_before} cookies")
             except Exception:
                 continue
 
+        # Build exhaustive profile list by scanning user-data folders
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        user_dirs = [
+            ("chrome", os.path.join(local_app, "Google", "Chrome", "User Data")),
+            ("chrome", os.path.join(local_app, "Google", "Chrome Beta", "User Data")),
+            ("chrome", os.path.join(local_app, "Google", "Chrome SxS", "User Data")),
+            ("edge", os.path.join(local_app, "Microsoft", "Edge", "User Data")),
+            ("chrome", os.path.join(local_app, "Chromium", "User Data")),
+            ("chrome", os.path.join(local_app, "BraveSoftware", "Brave-Browser", "User Data")),
+        ]
+
+        profile_paths = []
+        for browser_name, base in user_dirs:
+            if not os.path.isdir(base):
+                continue
+            # include Default and any Profile */Guest profiles
+            for profile_dir in os.listdir(base):
+                full_dir = os.path.join(base, profile_dir)
+                if not os.path.isdir(full_dir):
+                    continue
+                # Chrome/Edge changed cookie DB location to Network/Cookies in recent versions
+                profile_paths.append((browser_name, os.path.join(full_dir, "Cookies")))
+                profile_paths.append((browser_name, os.path.join(full_dir, "Network", "Cookies")))
+
+        # Prioritize last successful profile if recorded
+        if last_profile and os.path.exists(last_profile.get("cookie_path", "")):
+            lp = (last_profile.get("browser", ""), last_profile.get("cookie_path", ""))
+            if lp in profile_paths:
+                profile_paths.remove(lp)
+            profile_paths.insert(0, lp)
+
+        # Then prioritize most recently modified cookie DBs
+        profile_paths = sorted(
+            profile_paths,
+            key=lambda item: os.path.getmtime(item[1]) if os.path.exists(item[1]) else 0,
+            reverse=True
+        )
+
+        used_profile = None
+        tried_files = []
+        for browser_name, cookie_path in profile_paths:
+            if not os.path.exists(cookie_path):
+                continue
+            tried_files.append(cookie_path)
+            loader_func = None
+            if browser_cookie3:
+                loader_func = browser_cookie3.chrome if browser_name == "chrome" else browser_cookie3.edge
+            jar = None
+            if loader_func:
+                try:
+                    jar = load_cookie_file(loader_func, cookie_path)
+                except Exception as e:
+                    self.log(f"Auto Cookie: browser_cookie3 failed on {cookie_path}: {e}")
+                    jar = None
+
+            if jar is None and browser_name in ("chrome", "edge"):
+                # fallback manual reader
+                try:
+                    user_data_dir = Path(cookie_path).parents[2]
+                    local_state = user_data_dir / "Local State"
+                except Exception:
+                    local_state = ""
+                try:
+                    manual_cookies = read_chromium_cookies(cookie_path, local_state, douyin_domains)
+                    count_before = len(douyin_pairs)
+                    douyin_pairs.update(manual_cookies)
+                    found_now = len(douyin_pairs) - count_before
+                    self.log(f"Auto Cookie manual read: {cookie_path} found {found_now}")
+                except Exception as e:
+                    self.log(f"Auto Cookie manual read failed {cookie_path}: {e}")
+                    found_now = 0
+            elif jar:
+                count_before = len(douyin_pairs)
+                for cookie in jar:
+                    domain = getattr(cookie, 'domain', '') or ''
+                    if any(key in domain for key in ['douyin.com', 'iesdouyin.com', 'snssdk.com']):
+                        douyin_pairs[cookie.name] = cookie.value
+                found_now = len(douyin_pairs) - count_before
+            else:
+                found_now = 0
+
+            if found_now > 0:
+                loaded_from.append(f"{browser_name}:{os.path.basename(os.path.dirname(cookie_path))}")
+                used_profile = {"browser": browser_name, "cookie_path": cookie_path}
+            self.log(f"Auto Cookie: {browser_name} {os.path.basename(os.path.dirname(cookie_path))} found {found_now} cookies")
+            # Stop early if we already have a healthy set of cookies
+            if len(douyin_pairs) >= 10:
+                break
+
         if not douyin_pairs:
             messagebox.showwarning(
-                "No Douyin cookies",
-                "Could not find Douyin cookies.\nPlease login on Douyin in Chrome/Edge/Firefox first, then try again."
+                'No Douyin cookies',
+                'Could not find Douyin cookies.\nPlease login on Douyin in Chrome/Edge/Firefox first, then try again. ' +
+                'Neu ban dung nhieu profile (vi du Profile 1, Profile 2), hay thu dang nhap o profile mac dinh hoac bat tuy chon luu cookie.'
             )
+            self.log('[Auto Cookie] No cookies found. Tried files:\n' + '\n'.join(tried_files[:15]) + ('\n...' if len(tried_files) > 15 else ''))
             return
 
         cookie_string = '; '.join(f"{k}={v}" for k, v in douyin_pairs.items())
@@ -1846,6 +1987,14 @@ class DouyinYouTubeTool:
         self.toggle_advanced()
         self.show_headers.set(True)
         self.toggle_headers()
+
+        # Remember the profile that worked for the next run
+        if used_profile:
+            try:
+                with open(last_profile_file, "w", encoding="utf-8") as f:
+                    json.dump(used_profile, f)
+            except Exception:
+                pass
 
         self.log(f"🍪 Imported {len(douyin_pairs)} Douyin cookies from: {', '.join(loaded_from)}")
 
@@ -1947,18 +2096,23 @@ class DouyinYouTubeTool:
         thread.start()
         
     def analyze_url(self):
-        """Analyze URL and get video list"""
+        """Analyze URL and get media list (video/image/music) for a Douyin profile"""
         url = self.url_var.get().strip()
         if not url:
-            messagebox.showerror("Error", "Please provide API URL!")
+            messagebox.showerror("Error", "Please provide API URL or profile URL!")
             return
-            
-        if 'aweme/v1/web/aweme/post' not in url:
-            messagebox.showerror("Error", "URL must be Douyin API endpoint!")
-            return
+
+        # If user pasted profile URL, build API URL automatically
+        if "/user/" in url and "aweme/v1/web/aweme/post" not in url:
+            sec_user_id = self.extract_user_id_from_profile(url)
+            if not sec_user_id:
+                messagebox.showerror("Error", "Cannot extract sec_user_id from profile URL!")
+                return
+            url = self.build_profile_api_url(sec_user_id)
+            self.url_var.set(url)
             
         try:
-            self.log("🔍 Analyzing URL...")
+            self.log("?? Analyzing URL...")
             
             # Extract user ID
             sec_user_id = self.extract_user_id_from_api_url(url)
@@ -1980,7 +2134,7 @@ class DouyinYouTubeTool:
             max_pages = 200
 
             while page <= max_pages:
-                self.log(f"📄 Loading page {page}...")
+                self.log(f"?? Loading page {page}...")
                 
                 current_url = self.update_url_with_params(url, max_cursor, sec_user_id)
                 data = self.fetch_api_data(current_url)
@@ -2000,7 +2154,7 @@ class DouyinYouTubeTool:
                     if not video_info:
                         continue
 
-                    unique_key = video_info['aweme_id'] or video_info['url']
+                    unique_key = video_info.get('aweme_id') or video_info.get('url')
                     if unique_key in seen_ids:
                         continue
                     seen_ids.add(unique_key)
@@ -2009,13 +2163,15 @@ class DouyinYouTubeTool:
                     self.video_entries.append(video_info)
                     index = len(self.video_entries)
 
+                    display_url = video_info['url'][:80] + "..." if len(video_info['url']) > 80 else video_info['url']
+                    row_tag = 'odd' if index % 2 else 'even'
                     self.video_tree.insert('', 'end', values=(
-                        '☑',
+                        '?',
                         f"#{index:03d}",
-                        "📋 Found",
+                        "Found",
                         video_info['title'],
-                        video_info['url'][:80] + "..." if len(video_info['url']) > 80 else video_info['url']
-                    ))
+                        display_url
+                    ), tags=(row_tag,))
                         
                 if not has_more:
                     break
@@ -2024,17 +2180,17 @@ class DouyinYouTubeTool:
                 time.sleep(1)
                 
             if self.video_urls:
-                self.log(f"🎉 Found {len(self.video_urls)} videos")
-                self.video_count_var.set(f"📋 Videos: {len(self.video_urls)}")
+                self.log(f"?? Found {len(self.video_urls)} items")
+                self.video_count_var.set(f"📃 Media: {len(self.video_urls)}")
                 self.download_btn.config(state='normal')
             else:
-                self.log("❌ No videos found")
+                self.log("? No media found")
 
             if page > max_pages:
-                self.log(f"⚠️ Reached page limit ({max_pages}). Please verify if profile has more videos.")
+                self.log(f"?? Reached page limit ({max_pages}). Profile may have more items.")
                 
         except Exception as e:
-            self.log(f"❌ Analysis error: {e}")
+            self.log(f"? Analysis error: {e}")
             messagebox.showerror("Error", f"Analysis failed: {e}")
             
     def extract_user_id_from_api_url(self, url):
@@ -2047,6 +2203,34 @@ class DouyinYouTubeTool:
         except:
             pass
         return None
+
+    def extract_user_id_from_profile(self, url):
+        """Extract sec_user_id from profile URL (/user/<sec_user_id>)"""
+        try:
+            parsed = urlparse(url)
+            # Path like /user/SECID
+            parts = parsed.path.strip('/').split('/')
+            if len(parts) >= 2 and parts[0] == 'user':
+                return parts[1]
+        except Exception:
+            return None
+        return None
+
+    def build_profile_api_url(self, sec_user_id):
+        """Build Douyin web API URL for user posts"""
+        base = "https://www.douyin.com/aweme/v1/web/aweme/post/"
+        params = {
+            "device_platform": "webapp",
+            "aid": "6383",
+            "channel": "channel_pc_web",
+            "sec_user_id": sec_user_id,
+            "count": "20",
+            "max_cursor": "0",
+            "publish_video_strategy_type": "2",
+            "version_code": "190500",
+            "language": "vi",
+        }
+        return f"{base}?{urlencode(params)}"
         
     def update_url_with_params(self, base_url, max_cursor, sec_user_id):
         """Update URL with new parameters"""
@@ -2090,6 +2274,33 @@ class DouyinYouTubeTool:
     def extract_video_info(self, video_data):
         """Extract video url + metadata from API data"""
         try:
+            # Determine if video or image post
+            aweme_id = video_data.get('aweme_id', '')
+            description = video_data.get('desc', '').strip()
+            title = description if description else f"Douyin {aweme_id}".strip()
+            if len(title) > 80:
+                title = title[:77] + '...'
+
+            # Image post
+            if video_data.get('image_post_info') or video_data.get('images'):
+                images = video_data.get('image_post_info', {}).get('images') or video_data.get('images', [])
+                image_urls = []
+                for img in images:
+                    for u in img.get('url_list', []):
+                        if u:
+                            image_urls.append(u.replace('http://', 'https://'))
+                if not image_urls:
+                    return None
+                return {
+                    'aweme_id': aweme_id,
+                    'title': title + " (images)",
+                    'url': image_urls[0],
+                    'type': 'image',
+                    'image_urls': image_urls,
+                    'music_url': None
+                }
+
+            # Video post
             video_info = video_data.get('video', {})
 
             url_list = video_info.get('play_addr', {}).get('url_list', [])
@@ -2104,19 +2315,22 @@ class DouyinYouTubeTool:
             if not raw_url:
                 return None
 
-            url = raw_url.replace('http://', 'https://')
-            # Prefer non-watermark variant if present in endpoint name
-            url = url.replace('playwm', 'play')
+            url = raw_url.replace('http://', 'https://').replace('playwm', 'play')
 
-            description = video_data.get('desc', '').strip()
-            title = description if description else f"Douyin Video {video_data.get('aweme_id', '')}".strip()
-            if len(title) > 80:
-                title = title[:77] + '...'
+            cover_list = video_info.get('cover', {}).get('url_list', [])
+            cover_url = cover_list[0].replace('http://', 'https://') if cover_list else None
+
+            music = video_data.get('music', {})
+            music_list = music.get('play_url', {}).get('url_list', []) if music else []
+            music_url = music_list[0].replace('http://', 'https://') if music_list else None
 
             return {
-                'aweme_id': video_data.get('aweme_id', ''),
+                'aweme_id': aweme_id,
                 'title': title,
-                'url': url
+                'url': url,
+                'type': 'video',
+                'cover_url': cover_url,
+                'music_url': music_url
             }
 
         except Exception:
@@ -2168,33 +2382,27 @@ class DouyinYouTubeTool:
                     failed += 1
                     continue
 
-                current_video = self.video_entries[entry_index]
-                url = current_video['url']
+                current = self.video_entries[entry_index]
+                media_type = current.get('type', 'video')
 
-                filename = f"video_{i + 1:03d}.mp4"
-                file_path = os.path.join(self.download_folder, filename)
-                
-                self.video_tree.set(item, 'Status', '📥 Downloading...')
-                
-                if self.download_single_video(url, file_path, i):
+                self.video_tree.set(item, 'Status', '?? Downloading...')
+
+                try:
+                    if media_type == 'image':
+                        self.download_image_post(current, i)
+                    else:
+                        self.download_video_with_extras(current, i)
                     successful += 1
-                    self.video_files.append({
-                        'path': file_path,
-                        'filename': filename,
-                        'size': self.get_file_size(file_path),
-                        'title': current_video['title']
-                    })
-                    self.video_tree.set(item, 'Status', '✅ Downloaded')
-                else:
+                    self.video_tree.set(item, 'Status', 'Downloaded')
+                except Exception as e_inner:
                     failed += 1
-                    self.video_tree.set(item, 'Status', '❌ Failed')
-                
+                    self.video_tree.set(item, 'Status', 'Failed')
+                    self.log(f"? Download error for item {i + 1}: {e_inner}")
+
                 self.download_progress['value'] = i + 1
-                self.download_status_var.set(f"📥 Downloaded: {i + 1}/{total_videos}")
+                self.download_status_var.set(f"?Downloaded: {i + 1}/{total_videos}")
                 self.root.update_idletasks()
-                
-                time.sleep(1)
-                
+                time.sleep(0.5)
         except Exception as e:
             self.log(f"❌ Download error: {e}")
             
@@ -2231,6 +2439,43 @@ class DouyinYouTubeTool:
             self.log(f"❌ Download error for video {index + 1}: {e}")
             
         return False
+
+    def download_video_with_extras(self, video_entry, index):
+        """Download video plus cover and music when available"""
+        base_name = f"{video_entry.get('aweme_id','video')}_{index+1:03d}"
+        video_path = os.path.join(self.download_folder, f"{base_name}.mp4")
+        if self.download_single_video(video_entry['url'], video_path, index):
+            self.video_files.append({'path': video_path, 'filename': os.path.basename(video_path),
+                                     'size': self.get_file_size(video_path), 'title': video_entry.get('title','')})
+        # cover image
+        cover = video_entry.get('cover_url')
+        if cover:
+            cover_path = os.path.join(self.download_folder, f"{base_name}_cover.jpg")
+            self.download_binary(cover, cover_path)
+        # music
+        music = video_entry.get('music_url')
+        if music:
+            music_path = os.path.join(self.download_folder, f"{base_name}.mp3")
+            self.download_binary(music, music_path)
+
+    def download_image_post(self, entry, index):
+        """Download all images in an image post"""
+        base_name = f"{entry.get('aweme_id','image')}_{index+1:03d}"
+        for j, img_url in enumerate(entry.get('image_urls', []), start=1):
+            img_path = os.path.join(self.download_folder, f"{base_name}_{j:02d}.jpg")
+            self.download_binary(img_url, img_path)
+
+    def download_binary(self, url, path):
+        """Generic downloader for binary files"""
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://www.douyin.com/'
+        }
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            if resp.status == 200:
+                with open(path, 'wb') as f:
+                    f.write(resp.read())
         
     def get_file_size(self, file_path):
         """Get human readable file size"""
