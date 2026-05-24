@@ -5,6 +5,9 @@
 urllib3>=2.0.0
 requests>=2.31.0
 
+# YouTube/TikTok/Douyin downloader
+yt-dlp>=2025.1.1
+
 # YouTube API dependencies
 google-api-python-client>=2.70.0
 google-auth-httplib2>=0.1.0

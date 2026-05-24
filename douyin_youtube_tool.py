@@ -51,6 +51,14 @@ try:
 except ImportError:
     AES = None
 
+# yt-dlp for YouTube/TikTok/Douyin downloading
+YT_DLP_AVAILABLE = False
+try:
+    import yt_dlp
+    YT_DLP_AVAILABLE = True
+except ImportError:
+    yt_dlp = None
+
 # Check YouTube API availability
 # Third-party imports
 import tkinter as tk
@@ -768,6 +776,24 @@ DEFAULT_UPLOAD_SETTINGS = {
     'scheduled_time': None
 }
 
+# ── YouTube Downloader Constants ──────────────────────────────────────────────
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+YT_OUTPUT_DIR = os.path.join(_THIS_DIR, "output", "YouTube")
+YT_HISTORY_FILE = os.path.join(_THIS_DIR, "yt_history.txt")
+
+# Auto-detect ffmpeg bundled in project
+_FFMPEG_CANDIDATE = os.path.join(_THIS_DIR, "ffmpeg", "bin", "ffmpeg.exe")
+FFMPEG_DIR = os.path.join(_THIS_DIR, "ffmpeg", "bin") if os.path.exists(_FFMPEG_CANDIDATE) else None
+
+# Auto-detect Node.js for YouTube n-challenge solver
+def _find_node():
+    for p in [r"C:\Program Files\nodejs\node.exe",
+              r"C:\Program Files (x86)\nodejs\node.exe"]:
+        if os.path.exists(p):
+            return p
+    return shutil.which("node")
+NODE_PATH = _find_node()
+
 # Global YouTube API instance
 youtube_api = YouTubeAPI() if YOUTUBE_AVAILABLE else None
 
@@ -807,6 +833,12 @@ class DouyinYouTubeTool:
         
         # Upload settings
         self.upload_settings = DEFAULT_UPLOAD_SETTINGS.copy()
+
+        # YouTube Downloader state (yt-dlp)
+        self.yt_is_downloading = False
+        self.yt_progress_data = {}          # filled by progress hook
+        self.yt_output_dir = YT_OUTPUT_DIR
+        self.yt_cookies_file = ""
         
     def _init_youtube(self):
         """Initialize YouTube uploader"""
@@ -981,10 +1013,12 @@ class DouyinYouTubeTool:
 
         # Create tab contents
         self.create_download_tab()
+        self.create_yt_download_tab()
         self.create_upload_tab()
 
         # Add tabs to notebook
         self.content_container.add(self.download_frame, text="📥 Douyin Downloader")
+        self.content_container.add(self.yt_download_frame, text="🎬 YouTube Downloader")
         self.content_container.add(self.upload_frame, text="📤 YouTube Uploader")
         self.content_container.enable_traversal()
         self.content_container.bind("<<NotebookTabChanged>>", self.on_tab_changed)
@@ -1424,6 +1458,479 @@ class DouyinYouTubeTool:
         self.video_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         
+    # ══════════════════════════════════════════════════════════════════════════
+    #  YouTube / TikTok / Douyin Video Downloader  (powered by yt-dlp)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def create_yt_download_tab(self):
+        """Create YouTube/TikTok/Douyin downloader tab using yt-dlp."""
+        self.yt_download_frame = ttk.Frame(self.content_container)
+        main_frame = ttk.Frame(self.yt_download_frame, padding="15")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # ── yt-dlp availability warning ──────────────────────────────────────
+        if not YT_DLP_AVAILABLE:
+            warn = ttk.LabelFrame(main_frame, text="⚠️ yt-dlp Not Installed", padding="15")
+            warn.pack(fill=tk.X, pady=(0, 10))
+            ttk.Label(warn, text="yt-dlp is required for this tab.\n"
+                      "Run:  pip install yt-dlp  then restart the app.",
+                      font=('Segoe UI', 11), foreground='red').pack(anchor=tk.W)
+
+        # ── Quality selector ─────────────────────────────────────────────────
+        quality_frame = ttk.LabelFrame(main_frame, text="🎬 Chất Lượng Video", padding="10")
+        quality_frame.pack(fill=tk.X, pady=(0, 10))
+
+        self.yt_quality_var = tk.StringVar(value="1080p")
+        qualities = [("720p (Nhanh)", "720p"), ("1080p (Cân bằng)", "1080p"),
+                     ("1440p (Cao)", "1440p"), ("4K (Tốt nhất)", "4k"), ("Auto", "auto")]
+        for label, val in qualities:
+            ttk.Radiobutton(quality_frame, text=label, variable=self.yt_quality_var,
+                            value=val).pack(side=tk.LEFT, padx=8)
+
+        # ── Output folder ────────────────────────────────────────────────────
+        folder_frame = ttk.LabelFrame(main_frame, text="📁 Thư Mục Lưu Video", padding="10")
+        folder_frame.pack(fill=tk.X, pady=(0, 10))
+
+        folder_row = ttk.Frame(folder_frame)
+        folder_row.pack(fill=tk.X)
+
+        self.yt_output_dir_var = tk.StringVar(value=self.yt_output_dir)
+        ttk.Entry(folder_row, textvariable=self.yt_output_dir_var,
+                  font=('Consolas', 9)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        tk.Button(folder_row, text="📂 Browse", command=self._yt_select_output_folder,
+                  bg=self.colors['primary'], fg='white', font=('Segoe UI', 9, 'bold'),
+                  relief='flat', padx=10, pady=5).pack(side=tk.LEFT, padx=(0, 5))
+        tk.Button(folder_row, text="🔓 Mở Thư Mục", command=self._yt_open_output_folder,
+                  bg=self.colors['success'], fg=self.colors['dark'], font=('Segoe UI', 9, 'bold'),
+                  relief='flat', padx=10, pady=5).pack(side=tk.LEFT)
+
+        # ── Cookies (optional) ───────────────────────────────────────────────
+        cookie_frame = ttk.LabelFrame(main_frame,
+            text="🍪 YouTube Cookies (tùy chọn — dùng khi YouTube yêu cầu đăng nhập)",
+            padding="10")
+        cookie_frame.pack(fill=tk.X, pady=(0, 10))
+
+        cookie_row = ttk.Frame(cookie_frame)
+        cookie_row.pack(fill=tk.X)
+
+        self.yt_cookies_var = tk.StringVar(value="")
+        ttk.Entry(cookie_row, textvariable=self.yt_cookies_var,
+                  font=('Consolas', 9)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        tk.Button(cookie_row, text="📂 Browse", command=self._yt_select_cookies_file,
+                  bg=self.colors['primary'], fg='white', font=('Segoe UI', 9, 'bold'),
+                  relief='flat', padx=10, pady=5).pack(side=tk.LEFT, padx=(0, 5))
+        tk.Button(cookie_row, text="✖ Xóa", command=lambda: self.yt_cookies_var.set(""),
+                  bg=self.colors['warning'], fg=self.colors['dark'], font=('Segoe UI', 9, 'bold'),
+                  relief='flat', padx=10, pady=5).pack(side=tk.LEFT)
+        ttk.Label(cookie_frame,
+                  text="💡 Export cookies bằng extension 'Get cookies.txt LOCALLY' trên Chrome/Firefox",
+                  font=('Segoe UI', 8), foreground=self.colors['medium']).pack(anchor=tk.W, pady=(4, 0))
+
+        # ── Single download ──────────────────────────────────────────────────
+        single_frame = ttk.LabelFrame(main_frame, text="📥 Tải Video Đơn Lẻ", padding="10")
+        single_frame.pack(fill=tk.X, pady=(0, 10))
+
+        single_row = ttk.Frame(single_frame)
+        single_row.pack(fill=tk.X)
+
+        self.yt_url_var = tk.StringVar()
+        ttk.Entry(single_row, textvariable=self.yt_url_var,
+                  font=('Consolas', 10)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        self.yt_btn_single = tk.Button(single_row, text="▶ Tải Video",
+                  command=self._yt_start_single,
+                  bg=self.colors['primary'], fg='white', font=('Segoe UI', 10, 'bold'),
+                  relief='flat', padx=15, pady=7)
+        self.yt_btn_single.pack(side=tk.LEFT)
+
+        ttk.Label(single_frame,
+                  text="Hỗ trợ: YouTube, TikTok, Douyin (v.douyin.com, vm.tiktok.com, youtu.be, playlist…)",
+                  font=('Segoe UI', 8), foreground=self.colors['medium']).pack(anchor=tk.W, pady=(4, 0))
+
+        # ── Batch download ───────────────────────────────────────────────────
+        batch_frame = ttk.LabelFrame(main_frame, text="📋 Tải Hàng Loạt (mỗi URL một dòng)", padding="10")
+        batch_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        self.yt_batch_text = scrolledtext.ScrolledText(batch_frame, height=6,
+                  font=('Consolas', 9), bg=self.colors['light'], fg=self.colors['dark'],
+                  insertbackground=self.colors['primary'])
+        self.yt_batch_text.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+
+        btn_row = ttk.Frame(batch_frame)
+        btn_row.pack(fill=tk.X)
+        self.yt_btn_batch = tk.Button(btn_row, text="▶ Tải Tất Cả",
+                  command=self._yt_start_batch,
+                  bg=self.colors['primary'], fg='white', font=('Segoe UI', 10, 'bold'),
+                  relief='flat', padx=15, pady=7)
+        self.yt_btn_batch.pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(btn_row, text="🗑️ Xóa Danh Sách",
+                  command=lambda: self.yt_batch_text.delete("1.0", tk.END),
+                  bg=self.colors['warning'], fg=self.colors['dark'], font=('Segoe UI', 10, 'bold'),
+                  relief='flat', padx=15, pady=7).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(btn_row, text="📋 Xem Lịch Sử",
+                  command=self._yt_view_history,
+                  bg=self.colors['info'], fg='white', font=('Segoe UI', 10, 'bold'),
+                  relief='flat', padx=15, pady=7).pack(side=tk.LEFT)
+
+        # ── Progress + status ────────────────────────────────────────────────
+        prog_frame = ttk.Frame(main_frame)
+        prog_frame.pack(fill=tk.X, pady=(0, 5))
+
+        self.yt_progress_var = tk.DoubleVar(value=0)
+        self.yt_progressbar = ttk.Progressbar(prog_frame, variable=self.yt_progress_var,
+                                              maximum=100, length=500, mode='determinate')
+        self.yt_progressbar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+        self.yt_pct_label = ttk.Label(prog_frame, text="0%", font=('Segoe UI', 9, 'bold'), width=6)
+        self.yt_pct_label.pack(side=tk.LEFT)
+
+        self.yt_status_var = tk.StringVar(value="✅ Sẵn sàng tải")
+        self.yt_status_label = ttk.Label(main_frame, textvariable=self.yt_status_var,
+                                         font=('Segoe UI', 9), foreground=self.colors['primary'])
+        self.yt_status_label.pack(anchor=tk.W)
+
+        # ffmpeg / Node.js info row
+        info_parts = []
+        if FFMPEG_DIR:
+            info_parts.append("✅ FFmpeg: có")
+        else:
+            info_parts.append("⚠️ FFmpeg: không tìm thấy (video có thể là .webm)")
+        if NODE_PATH:
+            info_parts.append("✅ Node.js: có (n-challenge solver)")
+        else:
+            info_parts.append("ℹ️ Node.js: không tìm thấy")
+        ttk.Label(main_frame, text="  |  ".join(info_parts),
+                  font=('Segoe UI', 8), foreground=self.colors['medium']).pack(anchor=tk.W, pady=(2, 0))
+
+    # ── Helper: UI actions ────────────────────────────────────────────────────
+
+    def _yt_select_output_folder(self):
+        folder = filedialog.askdirectory(initialdir=self.yt_output_dir_var.get())
+        if folder:
+            self.yt_output_dir_var.set(folder)
+            self.yt_output_dir = folder
+
+    def _yt_open_output_folder(self):
+        folder = self.yt_output_dir_var.get().strip() or self.yt_output_dir
+        os.makedirs(folder, exist_ok=True)
+        os.startfile(folder)
+
+    def _yt_select_cookies_file(self):
+        path = filedialog.askopenfilename(
+            title="Chọn cookies.txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+        )
+        if path:
+            self.yt_cookies_var.set(path)
+
+    def _yt_view_history(self):
+        if not os.path.exists(YT_HISTORY_FILE):
+            messagebox.showinfo("Lịch Sử", "Chưa có video nào được tải.")
+            return
+        with open(YT_HISTORY_FILE, "r", encoding="utf-8") as f:
+            content = f.read()
+        win = tk.Toplevel(self.root)
+        win.title("📋 Lịch Sử Tải Video (yt-dlp)")
+        win.geometry("750x500")
+        st = scrolledtext.ScrolledText(win, font=('Consolas', 9), wrap=tk.WORD)
+        st.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        st.insert(tk.END, content)
+        st.config(state=tk.DISABLED)
+
+    def _yt_set_status(self, text, color=None):
+        """Thread-safe status update."""
+        def _upd():
+            self.yt_status_var.set(text)
+            if color and hasattr(self, 'yt_status_label'):
+                self.yt_status_label.config(foreground=color)
+        self.root.after(0, _upd)
+
+    def _yt_set_progress(self, pct: float):
+        """Thread-safe progress bar update (0–100)."""
+        def _upd():
+            self.yt_progress_var.set(pct)
+            self.yt_pct_label.config(text=f"{pct:.0f}%")
+        self.root.after(0, _upd)
+
+    def _yt_set_buttons(self, enabled: bool):
+        state = tk.NORMAL if enabled else tk.DISABLED
+        def _upd():
+            self.yt_btn_single.config(state=state)
+            self.yt_btn_batch.config(state=state)
+        self.root.after(0, _upd)
+
+    # ── Core download logic ───────────────────────────────────────────────────
+
+    def _yt_get_platform(self, url: str) -> str:
+        """Detect platform from URL: 'youtube' | 'tiktok' | 'douyin' | 'unknown'"""
+        host = urlparse(url).netloc.lower().lstrip("www.")
+        if host in ("youtube.com", "youtu.be", "m.youtube.com"):
+            return "youtube"
+        if host in ("tiktok.com", "vm.tiktok.com", "vt.tiktok.com"):
+            return "tiktok"
+        if host in ("douyin.com", "v.douyin.com"):
+            return "douyin"
+        return "unknown"
+
+    def _yt_is_valid_url(self, url: str) -> bool:
+        try:
+            r = urlparse(url.strip())
+            return r.scheme in ("http", "https") and bool(r.netloc)
+        except Exception:
+            return False
+
+    def _yt_format_for_quality(self, quality: str, platform: str) -> str:
+        """Return yt-dlp format selector string."""
+        is_yt = platform == "youtube"
+        table = {
+            "720p":  ("bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+                      "best[height<=720]/best"),
+            "1080p": ("bestvideo[height<=1080]+bestaudio/bestvideo[height<=720]+bestaudio/best",
+                      "best[height<=1080]/best"),
+            "1440p": ("bestvideo[height<=1440]+bestaudio/bestvideo[height<=1080]+bestaudio/best",
+                      "best[height<=1440]/best"),
+            "4k":    ("bestvideo[height<=2160]+bestaudio/bestvideo[height<=1080]+bestaudio/best",
+                      "best[height<=2160]/best"),
+        }
+        if quality in table:
+            return table[quality][0] if is_yt else table[quality][1]
+        return "bestvideo+bestaudio/best" if is_yt else "best"
+
+    def _yt_build_opts(self, fmt: str, output_dir: str) -> dict:
+        """Build yt-dlp options dict."""
+        os.makedirs(output_dir, exist_ok=True)
+        opts = {
+            "format": fmt,
+            "outtmpl": os.path.join(output_dir, "%(title)s.%(ext)s"),
+            "retries": 3,
+            "fragment_retries": 3,
+            "nocheckcertificate": True,
+            "quiet": True,
+            "no_warnings": False,
+            "progress_hooks": [self._yt_progress_hook],
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/122.0.0.0 Safari/537.36"
+                )
+            },
+        }
+        # FFmpeg
+        if FFMPEG_DIR:
+            opts["ffmpeg_location"] = FFMPEG_DIR
+            opts["merge_output_format"] = "mp4"
+            opts["postprocessors"] = [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}]
+        # Node.js (n-challenge solver)
+        if NODE_PATH:
+            opts["js_runtimes"] = {"node": {"path": NODE_PATH}}
+        # Cookies
+        cookies = self.yt_cookies_var.get().strip() if hasattr(self, 'yt_cookies_var') else ""
+        if cookies:
+            if not os.path.exists(cookies):
+                raise RuntimeError(f"Cookies file không tồn tại: {cookies}")
+            opts["cookiefile"] = cookies
+        return opts
+
+    def _yt_progress_hook(self, d: dict):
+        """yt-dlp progress hook — called from download thread."""
+        status = d.get("status", "")
+        if status == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate", 0)
+            downloaded = d.get("downloaded_bytes", 0)
+            if total and total > 0:
+                pct = downloaded / total * 100
+            else:
+                pct_str = d.get("_percent_str", "0%").strip().rstrip("%")
+                try:
+                    pct = float(pct_str)
+                except ValueError:
+                    pct = 0
+            filename = os.path.basename(d.get("filename", ""))[:35]
+            self._yt_set_progress(pct)
+            self._yt_set_status(f"⬇ Đang tải: {filename}… ({pct:.1f}%)", self.colors['primary'])
+        elif status == "finished":
+            self._yt_set_progress(100)
+
+    def _yt_save_history(self, title: str, url: str):
+        with open(YT_HISTORY_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{title} | {url}\n")
+
+    def _yt_is_duplicate(self, url: str) -> bool:
+        if not os.path.exists(YT_HISTORY_FILE):
+            return False
+        with open(YT_HISTORY_FILE, "r", encoding="utf-8") as f:
+            return url in f.read()
+
+    def _yt_run_download(self, opts: dict, url: str) -> str:
+        """Low-level yt-dlp call. Returns video title. Raises on error."""
+        if not YT_DLP_AVAILABLE:
+            raise RuntimeError("yt-dlp chưa được cài đặt. Chạy: pip install yt-dlp")
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            title = info.get("title", url) if info else url
+            self._yt_save_history(title, url)
+            return title
+
+    def _yt_download_single(self, url: str, quality: str) -> str:
+        """Download one video with 3-level fallback. Returns title."""
+        platform = self._yt_get_platform(url)
+        output_dir = self.yt_output_dir_var.get().strip() or self.yt_output_dir
+        fallbacks = [
+            self._yt_format_for_quality(quality, platform),
+            "bestvideo+bestaudio/best",
+            "bestvideo*+bestaudio*/best*",
+        ]
+        last_err = None
+        for attempt, fmt in enumerate(fallbacks, 1):
+            try:
+                self._yt_set_status(
+                    f"⬇ Attempt {attempt}/3: {url[:60]}…", self.colors['primary'])
+                opts = self._yt_build_opts(fmt, output_dir)
+                title = self._yt_run_download(opts, url)
+                return title
+            except Exception as e:
+                last_err = e
+                print(f"[yt-dlp] attempt {attempt} failed: {e}")
+                time.sleep(1)
+        raise RuntimeError(f"Tất cả {len(fallbacks)} lần thử đều thất bại: {last_err}")
+
+    def _yt_get_video_urls(self, url: str) -> list:
+        """Extract list of video URLs (handles playlists)."""
+        if not YT_DLP_AVAILABLE:
+            return [url]
+        cookies = self.yt_cookies_var.get().strip() if hasattr(self, 'yt_cookies_var') else ""
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": True,
+            "skip_download": True,
+        }
+        if cookies and os.path.exists(cookies):
+            opts["cookiefile"] = cookies
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        if not info:
+            raise RuntimeError(f"Không thể lấy thông tin từ: {url}")
+        if "entries" in info:          # playlist
+            return [e["url"] if "url" in e else e.get("webpage_url", url)
+                    for e in info["entries"] if e]
+        return [info.get("webpage_url", url)]
+
+    # ── UI handlers (run in threads) ──────────────────────────────────────────
+
+    def _yt_start_single(self):
+        if self.yt_is_downloading:
+            messagebox.showwarning("Đang tải", "Một tác vụ đang chạy, vui lòng chờ.")
+            return
+        url = self.yt_url_var.get().strip()
+        if not url:
+            messagebox.showwarning("Thiếu URL", "Vui lòng nhập URL video.")
+            return
+        if not self._yt_is_valid_url(url):
+            messagebox.showerror("URL không hợp lệ", f"URL không hợp lệ:\n{url}")
+            return
+        threading.Thread(target=self._yt_thread_single, args=(url,), daemon=True).start()
+
+    def _yt_thread_single(self, url: str):
+        self.yt_is_downloading = True
+        self._yt_set_buttons(False)
+        self._yt_set_progress(0)
+        quality = self.yt_quality_var.get()
+        downloaded, skipped, failed = [], [], []
+        try:
+            urls = self._yt_get_video_urls(url)
+            for u in urls:
+                if self._yt_is_duplicate(u):
+                    skipped.append(u)
+                    continue
+                try:
+                    title = self._yt_download_single(u, quality)
+                    downloaded.append(title)
+                    self._yt_set_status(f"✅ Đã tải: {title[:50]}", self.colors['secondary'])
+                except Exception as e:
+                    failed.append(str(e))
+                    self._yt_set_status(f"❌ Lỗi: {str(e)[:60]}", self.colors['danger'])
+        except Exception as e:
+            failed.append(str(e))
+            self._yt_set_status(f"❌ {str(e)[:80]}", self.colors['danger'])
+        finally:
+            self.yt_is_downloading = False
+            self._yt_set_buttons(True)
+            self._yt_set_progress(100 if downloaded else 0)
+            summary = (f"✅ Đã tải: {len(downloaded)}\n"
+                       f"⏭ Bỏ qua (đã có): {len(skipped)}\n"
+                       f"❌ Lỗi: {len(failed)}")
+            if failed:
+                summary += "\n\nLỗi chi tiết:\n" + "\n".join(failed[:5])
+            self.root.after(0, lambda: messagebox.showinfo("Kết Quả Tải", summary))
+
+    def _yt_start_batch(self):
+        if self.yt_is_downloading:
+            messagebox.showwarning("Đang tải", "Một tác vụ đang chạy, vui lòng chờ.")
+            return
+        raw = self.yt_batch_text.get("1.0", tk.END).strip()
+        if not raw:
+            messagebox.showwarning("Thiếu URL", "Vui lòng nhập ít nhất một URL.")
+            return
+        lines = [l.strip() for l in raw.splitlines() if l.strip()]
+        valid = [u for u in lines if self._yt_is_valid_url(u)]
+        invalid = [u for u in lines if not self._yt_is_valid_url(u)]
+        if invalid:
+            msg = f"{len(invalid)} URL không hợp lệ sẽ bị bỏ qua:\n" + "\n".join(invalid[:5])
+            if not messagebox.askyesno("URL không hợp lệ", msg + "\n\nTiếp tục?"):
+                return
+        if not valid:
+            messagebox.showerror("Không có URL hợp lệ", "Không tìm thấy URL hợp lệ nào.")
+            return
+        threading.Thread(target=self._yt_thread_batch, args=(valid,), daemon=True).start()
+
+    def _yt_thread_batch(self, urls: list):
+        self.yt_is_downloading = True
+        self._yt_set_buttons(False)
+        self._yt_set_progress(0)
+        quality = self.yt_quality_var.get()
+        downloaded, skipped, failed = [], [], []
+        total = len(urls)
+        for i, url in enumerate(urls, 1):
+            self._yt_set_status(
+                f"[{i}/{total}] ⬇ {url[:55]}…", self.colors['primary'])
+            self._yt_set_progress((i - 1) / total * 100)
+            if self._yt_is_duplicate(url):
+                skipped.append(url)
+                continue
+            try:
+                # Expand playlist if needed
+                try:
+                    sub_urls = self._yt_get_video_urls(url)
+                except Exception:
+                    sub_urls = [url]
+                for u in sub_urls:
+                    if self._yt_is_duplicate(u):
+                        skipped.append(u)
+                        continue
+                    try:
+                        title = self._yt_download_single(u, quality)
+                        downloaded.append(title)
+                    except Exception as e:
+                        failed.append(f"{u}: {e}")
+            except Exception as e:
+                failed.append(f"{url}: {e}")
+        self.yt_is_downloading = False
+        self._yt_set_buttons(True)
+        self._yt_set_progress(100)
+        self._yt_set_status(
+            f"✅ Hoàn thành — Đã tải: {len(downloaded)}, Bỏ qua: {len(skipped)}, Lỗi: {len(failed)}",
+            self.colors['secondary'])
+        summary = (f"✅ Đã tải: {len(downloaded)}\n"
+                   f"⏭ Bỏ qua (đã có): {len(skipped)}\n"
+                   f"❌ Lỗi: {len(failed)}")
+        if failed:
+            summary += "\n\nLỗi chi tiết:\n" + "\n".join(failed[:5])
+        self.root.after(0, lambda: messagebox.showinfo("Kết Quả Tải Hàng Loạt", summary))
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  END YouTube Downloader
+    # ══════════════════════════════════════════════════════════════════════════
+
     def create_upload_tab(self):
         """Create upload tab (YouTube uploader)"""
         self.upload_frame = ttk.Frame(self.content_container)
