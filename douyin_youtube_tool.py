@@ -2007,21 +2007,31 @@ class DouyinYouTubeTool:
             return False
 
     def _yt_format_for_quality(self, quality: str, platform: str) -> str:
-        """Return yt-dlp format selector string."""
-        is_yt = platform == "youtube"
-        table = {
-            "720p":  ("bestvideo[height<=720]+bestaudio/best[height<=720]/best",
-                      "best[height<=720]/best"),
-            "1080p": ("bestvideo[height<=1080]+bestaudio/bestvideo[height<=720]+bestaudio/best",
-                      "best[height<=1080]/best"),
-            "1440p": ("bestvideo[height<=1440]+bestaudio/bestvideo[height<=1080]+bestaudio/best",
-                      "best[height<=1440]/best"),
-            "4k":    ("bestvideo[height<=2160]+bestaudio/bestvideo[height<=1080]+bestaudio/best",
-                      "best[height<=2160]/best"),
-        }
-        if quality in table:
-            return table[quality][0] if is_yt else table[quality][1]
-        return "bestvideo+bestaudio/best" if is_yt else "best"
+        """Return yt-dlp format selector string.
+
+        YouTube uses DASH streams (separate video+audio) so we request
+        bestvideo+bestaudio and let FFmpeg merge.  Prefer mp4/m4a to avoid
+        transcode when FFmpeg is present; fall back to any codec otherwise.
+
+        For non-YouTube (TikTok / Douyin) streams are already muxed, so
+        a simple 'best[height<=N]' is sufficient.
+        """
+        if platform != "youtube":
+            # Non-YouTube: single muxed stream
+            cap = {"720p": 720, "1080p": 1080, "1440p": 1440, "4k": 2160}.get(quality)
+            return f"best[height<={cap}]/best" if cap else "best"
+
+        # YouTube: DASH (separate video+audio)
+        # Prefer mp4+m4a (no transcode), fall back to any codec
+        cap = {"720p": 720, "1080p": 1080, "1440p": 1440, "4k": 2160}.get(quality)
+        if cap:
+            return (
+                f"bestvideo[height<={cap}][ext=mp4]+bestaudio[ext=m4a]"
+                f"/bestvideo[height<={cap}]+bestaudio"
+                f"/best[height<={cap}]/best"
+            )
+        # auto / best
+        return "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
 
     def _yt_build_opts(self, fmt: str, output_dir: str,
                        extra: dict | None = None) -> dict:
@@ -2040,10 +2050,12 @@ class DouyinYouTubeTool:
             "quiet": True,
             "no_warnings": False,
             "progress_hooks": [self._yt_progress_hook],
-            # Use Android + web player clients by default to bypass bot-check
+            # tv_embedded: bypass bot-check for public videos AND full quality (DASH)
+            # ios: fallback with good quality support
+            # web: last resort for metadata (may need cookies)
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["android", "web"],
+                    "player_client": ["tv_embedded", "ios", "web"],
                 }
             },
             "http_headers": {
@@ -2116,62 +2128,82 @@ class DouyinYouTubeTool:
     def _yt_download_single(self, url: str, quality: str) -> str:
         """Download one video with multi-level fallback. Returns title.
 
-        Fallback order (YouTube-specific bot-check bypass):
-          1. Chosen quality  + android+web clients   (default, no cookies needed)
-          2. best            + android+web clients
-          3. best            + mweb client
-          4. best            + cookiesfrombrowser: chrome  (if available)
-          5. best            + cookiesfrombrowser: edge    (if available)
-          6. best            + cookiesfrombrowser: firefox (if available)
-        For non-YouTube platforms only fallbacks 1-3 run.
+        Priority: QUALITY FIRST, then bot-bypass, then cookies.
+
+        Fallback order for YouTube public videos (no cookies required):
+          1. Chosen quality + tv_embedded+ios+web   ← DASH full quality, bot bypass
+          2. Chosen quality + ios+web               ← iOS client, full quality
+          3. Chosen quality + web only              ← standard web (may need cookies)
+          4. bestvideo+bestaudio + tv_embedded      ← last no-cookie attempt
+          5-8. Chosen quality + cookiesfrombrowser  ← chrome/edge/firefox/chromium
+        Non-YouTube: only steps 1-2 run (no DASH, no cookie fallback needed).
         """
         platform = self._yt_get_platform(url)
         output_dir = self.yt_output_dir_var.get().strip() or self.yt_output_dir
+        q_fmt = self._yt_format_for_quality(quality, platform)
 
-        # (format_string, extra_opts_override)
-        steps: list[tuple[str, dict]] = [
-            (self._yt_format_for_quality(quality, platform), {}),
-            ("bestvideo+bestaudio/best",  {}),
-            ("bestvideo*+bestaudio*/best*",
-             {"extractor_args": {"youtube": {"player_client": ["mweb"]}}}),
-        ]
-
-        # For YouTube: add browser-cookie fallbacks automatically
+        # (label, format_string, extractor_args_override, cookiesfrombrowser)
         if platform == "youtube":
-            no_merge = "best"   # simpler format avoids ffmpeg requirement
-            for browser in ("chrome", "edge", "firefox", "chromium"):
-                steps.append((no_merge, {"cookiesfrombrowser": (browser,)}))
+            steps = [
+                # ── No-cookie, full-quality attempts ──────────────────────
+                ("tv_embedded+ios", q_fmt,
+                 {"extractor_args": {"youtube": {"player_client": ["tv_embedded", "ios", "web"]}}},
+                 None),
+                ("ios+web", q_fmt,
+                 {"extractor_args": {"youtube": {"player_client": ["ios", "web"]}}},
+                 None),
+                ("web", q_fmt,
+                 {"extractor_args": {"youtube": {"player_client": ["web"]}}},
+                 None),
+                ("tv_embedded/best", "bestvideo+bestaudio/best",
+                 {"extractor_args": {"youtube": {"player_client": ["tv_embedded"]}}},
+                 None),
+                # ── Cookie-based fallbacks ─────────────────────────────────
+                ("chrome+cookies",   q_fmt, {}, "chrome"),
+                ("edge+cookies",     q_fmt, {}, "edge"),
+                ("firefox+cookies",  q_fmt, {}, "firefox"),
+                ("chromium+cookies", q_fmt, {}, "chromium"),
+            ]
+        else:
+            steps = [
+                ("default", q_fmt, {}, None),
+                ("best",    "best", {}, None),
+            ]
 
         last_err = None
         total = len(steps)
-        for attempt, (fmt, extra) in enumerate(steps, 1):
-            label = extra.get("cookiesfrombrowser", ("",))[0] or "android/web"
+        for attempt, (label, fmt, extra_ea, browser) in enumerate(steps, 1):
             try:
                 self._yt_set_status(
-                    f"⬇ [{attempt}/{total}] {label}: {url[:55]}…",
+                    f"⬇ [{attempt}/{total}] {label}: {url[:50]}…",
                     self.colors['primary'])
+                extra: dict = dict(extra_ea)   # copy
+                if browser:
+                    extra["cookiesfrombrowser"] = (browser,)
                 opts = self._yt_build_opts(fmt, output_dir, extra)
                 title = self._yt_run_download(opts, url)
                 if attempt > 1:
-                    print(f"[yt-dlp] succeeded on attempt {attempt} ({label})")
+                    print(f"[yt-dlp] success on attempt {attempt} ({label})")
                 return title
             except Exception as e:
                 last_err = e
                 err_str = str(e)
-                # Only continue to next fallback for bot/sign-in errors
-                bot_error = any(k in err_str.lower() for k in
-                                ("sign in", "bot", "confirm", "cookies", "403",
-                                 "login", "private", "unavailable"))
-                print(f"[yt-dlp] attempt {attempt}/{total} ({label}) failed: {err_str[:120]}")
-                if not bot_error and attempt <= 3:
-                    # Non-auth error on first 3 tries → stop early
+                bot_err = any(k in err_str.lower() for k in
+                              ("sign in", "bot", "confirm", "cookie", "403",
+                               "login", "private", "unavailable", "blocked"))
+                print(f"[yt-dlp] attempt {attempt}/{total} ({label}) failed: {err_str[:150]}")
+                # Stop early only for non-bot errors on the first no-cookie attempts
+                if not bot_err and attempt <= 4:
                     break
                 time.sleep(1)
 
-        raise RuntimeError(f"Tất cả {len(steps)} lần thử đều thất bại.\n\n"
-                           f"Lỗi cuối: {last_err}\n\n"
-                           f"💡 Giải pháp: Nhấn '🍪 Auto từ Browser' để import cookies\n"
-                           f"   hoặc dùng Browse để chọn file cookies.txt")
+        raise RuntimeError(
+            f"Tất cả {total} lần thử đều thất bại.\n\n"
+            f"Lỗi: {str(last_err)[:200]}\n\n"
+            f"💡 Giải pháp:\n"
+            f"  • Nhấn '🍪 Auto từ Browser' để tự lấy cookie\n"
+            f"  • Hoặc Browse chọn file cookies.txt xuất từ Chrome"
+        )
 
     def _yt_get_video_urls(self, url: str) -> list:
         """Extract list of video URLs (handles playlists)."""
@@ -2183,8 +2215,8 @@ class DouyinYouTubeTool:
             "no_warnings": True,
             "extract_flat": True,
             "skip_download": True,
-            # Use android client to reduce bot-check on metadata extraction too
-            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+            # tv_embedded bypasses bot-check for public video metadata
+            "extractor_args": {"youtube": {"player_client": ["tv_embedded", "ios", "web"]}},
         }
         if cookies and os.path.exists(cookies):
             opts["cookiefile"] = cookies
