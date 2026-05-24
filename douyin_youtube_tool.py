@@ -1600,6 +1600,83 @@ class DouyinYouTubeTool:
         ttk.Label(main_frame, text="  |  ".join(info_parts),
                   font=('Segoe UI', 8), foreground=self.colors['medium']).pack(anchor=tk.W, pady=(2, 0))
 
+        # ── Downloaded videos list ────────────────────────────────────────────
+        dl_list_frame = ttk.LabelFrame(main_frame,
+            text="📂 Danh Sách Video Đã Tải — chọn để upload lên YouTube",
+            padding="10")
+        dl_list_frame.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
+
+        # Toolbar
+        dl_toolbar = ttk.Frame(dl_list_frame)
+        dl_toolbar.pack(fill=tk.X, pady=(0, 6))
+
+        tk.Button(dl_toolbar, text="🔄 Làm Mới",
+                  command=self._yt_refresh_dl_list,
+                  bg=self.colors['primary'], fg='white',
+                  font=('Segoe UI', 9, 'bold'), relief='flat', padx=10, pady=5
+                  ).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(dl_toolbar, text="✅ Chọn Tất Cả",
+                  command=self._yt_dl_select_all,
+                  bg=self.colors['success'], fg=self.colors['dark'],
+                  font=('Segoe UI', 9, 'bold'), relief='flat', padx=10, pady=5
+                  ).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(dl_toolbar, text="⬜ Bỏ Chọn",
+                  command=self._yt_dl_deselect_all,
+                  bg=self.colors['warning'], fg=self.colors['dark'],
+                  font=('Segoe UI', 9, 'bold'), relief='flat', padx=10, pady=5
+                  ).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(dl_toolbar, text="🗑️ Xóa File",
+                  command=self._yt_dl_delete_selected,
+                  bg=self.colors['danger'], fg='white',
+                  font=('Segoe UI', 9, 'bold'), relief='flat', padx=10, pady=5
+                  ).pack(side=tk.LEFT, padx=(0, 16))
+
+        self.yt_dl_count_var = tk.StringVar(value="0 video")
+        ttk.Label(dl_toolbar, textvariable=self.yt_dl_count_var,
+                  font=('Segoe UI', 9, 'bold'),
+                  foreground=self.colors['primary']).pack(side=tk.LEFT)
+
+        self.yt_send_btn = tk.Button(dl_toolbar, text="🚀 Gửi lên Upload Tab",
+                  command=self._yt_send_to_upload_tab,
+                  bg='#E53935', fg='white',
+                  font=('Segoe UI', 10, 'bold'), relief='flat', padx=16, pady=6)
+        self.yt_send_btn.pack(side=tk.RIGHT)
+        ttk.Label(dl_toolbar, text="⬅",
+                  font=('Segoe UI', 10)).pack(side=tk.RIGHT, padx=(0, 4))
+
+        # Treeview
+        dl_cols = ("sel", "filename", "size", "date", "path")
+        self.yt_dl_tree = ttk.Treeview(dl_list_frame, columns=dl_cols,
+                                        show='headings', height=7)
+        self.yt_dl_tree.heading("sel",      text="✓",        anchor=tk.CENTER)
+        self.yt_dl_tree.heading("filename", text="📹 Tên File")
+        self.yt_dl_tree.heading("size",     text="📊 Kích thước", anchor=tk.CENTER)
+        self.yt_dl_tree.heading("date",     text="📅 Ngày tải",   anchor=tk.CENTER)
+        self.yt_dl_tree.heading("path",     text="📁 Đường dẫn")
+
+        self.yt_dl_tree.column("sel",      width=40,  minwidth=40,  anchor=tk.CENTER, stretch=False)
+        self.yt_dl_tree.column("filename", width=300, minwidth=150)
+        self.yt_dl_tree.column("size",     width=90,  minwidth=70,  anchor=tk.CENTER, stretch=False)
+        self.yt_dl_tree.column("date",     width=110, minwidth=90,  anchor=tk.CENTER, stretch=False)
+        self.yt_dl_tree.column("path",     width=0,   minwidth=0,   stretch=False)   # hidden
+
+        self.yt_dl_tree.tag_configure("checked",   background="#e3f2fd", foreground="#1565C0")
+        self.yt_dl_tree.tag_configure("unchecked", background=self.colors['light'],
+                                       foreground=self.colors['dark'])
+
+        dl_scroll = ttk.Scrollbar(dl_list_frame, orient=tk.VERTICAL,
+                                   command=self.yt_dl_tree.yview)
+        self.yt_dl_tree.configure(yscrollcommand=dl_scroll.set)
+        self.yt_dl_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        dl_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Toggle selection on click
+        self.yt_dl_tree.bind("<Button-1>", self._yt_dl_on_click)
+        self.yt_dl_tree.bind("<Double-1>", self._yt_dl_on_click)
+
+        # Populate on first load
+        self.root.after(300, self._yt_refresh_dl_list)
+
     # ── Helper: UI actions ────────────────────────────────────────────────────
 
     def _yt_select_output_folder(self):
@@ -1607,6 +1684,7 @@ class DouyinYouTubeTool:
         if folder:
             self.yt_output_dir_var.set(folder)
             self.yt_output_dir = folder
+            self._yt_refresh_dl_list()   # show files in new folder
 
     def _yt_open_output_folder(self):
         folder = self.yt_output_dir_var.get().strip() or self.yt_output_dir
@@ -1634,6 +1712,179 @@ class DouyinYouTubeTool:
         st.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         st.insert(tk.END, content)
         st.config(state=tk.DISABLED)
+
+    # ── Downloaded-list helpers ───────────────────────────────────────────────
+
+    _YT_VIDEO_EXTS = {'.mp4', '.mkv', '.webm', '.avi', '.mov', '.flv', '.wmv', '.m4v'}
+
+    def _yt_refresh_dl_list(self):
+        """Scan output folder and repopulate the downloaded-videos treeview."""
+        if not hasattr(self, 'yt_dl_tree'):
+            return
+        folder = self.yt_output_dir_var.get().strip() if hasattr(self, 'yt_output_dir_var') \
+                 else self.yt_output_dir
+        # Preserve currently-checked filenames so a refresh keeps selections
+        checked = {
+            self.yt_dl_tree.set(i, "filename")
+            for i in self.yt_dl_tree.get_children()
+            if self.yt_dl_tree.set(i, "sel") == "✓"
+        }
+
+        for item in self.yt_dl_tree.get_children():
+            self.yt_dl_tree.delete(item)
+
+        if not os.path.isdir(folder):
+            self.yt_dl_count_var.set("0 video")
+            return
+
+        files = []
+        for fname in os.listdir(folder):
+            fpath = os.path.join(folder, fname)
+            if os.path.isfile(fpath):
+                _, ext = os.path.splitext(fname.lower())
+                if ext in self._YT_VIDEO_EXTS:
+                    files.append(fpath)
+
+        # Sort newest first
+        files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+
+        for fpath in files:
+            fname = os.path.basename(fpath)
+            size_bytes = os.path.getsize(fpath)
+            if size_bytes >= 1024 ** 3:
+                size_str = f"{size_bytes / 1024**3:.1f} GB"
+            elif size_bytes >= 1024 ** 2:
+                size_str = f"{size_bytes / 1024**2:.1f} MB"
+            else:
+                size_str = f"{size_bytes / 1024:.0f} KB"
+            mtime = datetime.fromtimestamp(os.path.getmtime(fpath)).strftime("%d/%m %H:%M")
+            is_checked = fname in checked
+            tag = "checked" if is_checked else "unchecked"
+            self.yt_dl_tree.insert("", "end", values=(
+                "✓" if is_checked else "○",
+                fname, size_str, mtime, fpath
+            ), tags=(tag,))
+
+        count = len(files)
+        checked_count = sum(
+            1 for i in self.yt_dl_tree.get_children()
+            if self.yt_dl_tree.set(i, "sel") == "✓"
+        )
+        self.yt_dl_count_var.set(
+            f"{count} video" + (f"  |  {checked_count} đã chọn" if checked_count else "")
+        )
+
+    def _yt_dl_on_click(self, event):
+        """Toggle check-state when user clicks a row."""
+        region = self.yt_dl_tree.identify_region(event.x, event.y)
+        if region not in ("cell", "tree"):
+            return
+        item = self.yt_dl_tree.identify_row(event.y)
+        if not item:
+            return
+        current = self.yt_dl_tree.set(item, "sel")
+        if current == "✓":
+            self.yt_dl_tree.set(item, "sel", "○")
+            self.yt_dl_tree.item(item, tags=("unchecked",))
+        else:
+            self.yt_dl_tree.set(item, "sel", "✓")
+            self.yt_dl_tree.item(item, tags=("checked",))
+        self._yt_dl_update_count()
+        return "break"   # prevent default selection highlight
+
+    def _yt_dl_update_count(self):
+        total = len(self.yt_dl_tree.get_children())
+        checked = sum(
+            1 for i in self.yt_dl_tree.get_children()
+            if self.yt_dl_tree.set(i, "sel") == "✓"
+        )
+        self.yt_dl_count_var.set(
+            f"{total} video" + (f"  |  {checked} đã chọn" if checked else "")
+        )
+
+    def _yt_dl_select_all(self):
+        for item in self.yt_dl_tree.get_children():
+            self.yt_dl_tree.set(item, "sel", "✓")
+            self.yt_dl_tree.item(item, tags=("checked",))
+        self._yt_dl_update_count()
+
+    def _yt_dl_deselect_all(self):
+        for item in self.yt_dl_tree.get_children():
+            self.yt_dl_tree.set(item, "sel", "○")
+            self.yt_dl_tree.item(item, tags=("unchecked",))
+        self._yt_dl_update_count()
+
+    def _yt_dl_delete_selected(self):
+        selected = [
+            self.yt_dl_tree.set(i, "path")
+            for i in self.yt_dl_tree.get_children()
+            if self.yt_dl_tree.set(i, "sel") == "✓"
+        ]
+        if not selected:
+            messagebox.showinfo("Chưa chọn", "Hãy chọn ít nhất một video để xóa.")
+            return
+        if not messagebox.askyesno(
+            "Xác nhận xóa",
+            f"Xóa {len(selected)} file khỏi ổ đĩa?\n\n" + "\n".join(
+                os.path.basename(p) for p in selected[:5]
+            ) + ("…" if len(selected) > 5 else "")
+        ):
+            return
+        errors = []
+        for path in selected:
+            try:
+                os.remove(path)
+            except Exception as e:
+                errors.append(f"{os.path.basename(path)}: {e}")
+        self._yt_refresh_dl_list()
+        if errors:
+            messagebox.showwarning("Một số lỗi", "\n".join(errors))
+
+    def _yt_send_to_upload_tab(self):
+        """Add checked videos to the YouTube Upload tab then switch to it."""
+        selected_paths = [
+            self.yt_dl_tree.set(i, "path")
+            for i in self.yt_dl_tree.get_children()
+            if self.yt_dl_tree.set(i, "sel") == "✓"
+        ]
+        if not selected_paths:
+            messagebox.showinfo(
+                "Chưa chọn video",
+                "Hãy chọn (✓) ít nhất một video trong danh sách."
+            )
+            return
+
+        # Determine the folder (all files come from the same output dir)
+        folder = self.yt_output_dir_var.get().strip() or self.yt_output_dir
+        self.current_video_folder = folder
+
+        added = 0
+        for path in selected_paths:
+            if os.path.exists(path):
+                self.add_video_to_upload_list(path)
+                added += 1
+
+        if added == 0:
+            messagebox.showwarning("Không tìm thấy file",
+                                   "Không file nào tồn tại trên ổ đĩa.")
+            return
+
+        # Switch to the Upload tab (index 2 = "📤 YouTube Uploader")
+        try:
+            tabs = self.content_container.tabs()
+            for idx, tab_id in enumerate(tabs):
+                if "Uploader" in self.content_container.tab(tab_id, "text"):
+                    self.content_container.select(tab_id)
+                    break
+        except Exception:
+            pass
+
+        self.log(f"📤 Đã gửi {added} video sang Upload Tab")
+        messagebox.showinfo(
+            "Đã gửi sang Upload Tab",
+            f"✅ {added} video đã được thêm vào danh sách Upload.\n\n"
+            "Chuyển sang tab 📤 YouTube Uploader để upload."
+        )
 
     def _yt_set_status(self, text, color=None):
         """Thread-safe status update."""
@@ -1856,6 +2107,7 @@ class DouyinYouTubeTool:
             self.yt_is_downloading = False
             self._yt_set_buttons(True)
             self._yt_set_progress(100 if downloaded else 0)
+            self.root.after(0, self._yt_refresh_dl_list)   # auto-refresh list
             summary = (f"✅ Đã tải: {len(downloaded)}\n"
                        f"⏭ Bỏ qua (đã có): {len(skipped)}\n"
                        f"❌ Lỗi: {len(failed)}")
@@ -1920,6 +2172,7 @@ class DouyinYouTubeTool:
         self._yt_set_status(
             f"✅ Hoàn thành — Đã tải: {len(downloaded)}, Bỏ qua: {len(skipped)}, Lỗi: {len(failed)}",
             self.colors['secondary'])
+        self.root.after(0, self._yt_refresh_dl_list)   # auto-refresh list
         summary = (f"✅ Đã tải: {len(downloaded)}\n"
                    f"⏭ Bỏ qua (đã có): {len(skipped)}\n"
                    f"❌ Lỗi: {len(failed)}")
