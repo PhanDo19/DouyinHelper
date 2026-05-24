@@ -1521,10 +1521,20 @@ class DouyinYouTubeTool:
                   relief='flat', padx=10, pady=5).pack(side=tk.LEFT, padx=(0, 5))
         tk.Button(cookie_row, text="✖ Xóa", command=lambda: self.yt_cookies_var.set(""),
                   bg=self.colors['warning'], fg=self.colors['dark'], font=('Segoe UI', 9, 'bold'),
+                  relief='flat', padx=10, pady=5).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(cookie_row, text="🍪 Auto từ Browser",
+                  command=self._yt_auto_cookie_from_browser,
+                  bg='#795548', fg='white', font=('Segoe UI', 9, 'bold'),
                   relief='flat', padx=10, pady=5).pack(side=tk.LEFT)
-        ttk.Label(cookie_frame,
-                  text="💡 Export cookies bằng extension 'Get cookies.txt LOCALLY' trên Chrome/Firefox",
-                  font=('Segoe UI', 8), foreground=self.colors['medium']).pack(anchor=tk.W, pady=(4, 0))
+
+        hint_row = ttk.Frame(cookie_frame)
+        hint_row.pack(fill=tk.X, pady=(6, 0))
+        ttk.Label(hint_row,
+                  text="⚡ Nếu bị lỗi 'Sign in / bot': nhấn  🍪 Auto từ Browser  hoặc browse chọn cookies.txt",
+                  font=('Segoe UI', 8, 'bold'), foreground='#C62828').pack(side=tk.LEFT)
+        ttk.Label(hint_row,
+                  text="  |  Export thủ công: extension 'Get cookies.txt LOCALLY' trên Chrome",
+                  font=('Segoe UI', 8), foreground=self.colors['medium']).pack(side=tk.LEFT)
 
         # ── Single download ──────────────────────────────────────────────────
         single_frame = ttk.LabelFrame(main_frame, text="📥 Tải Video Đơn Lẻ", padding="10")
@@ -1698,6 +1708,74 @@ class DouyinYouTubeTool:
         )
         if path:
             self.yt_cookies_var.set(path)
+
+    def _yt_auto_cookie_from_browser(self):
+        """Export YouTube cookies from the first available browser and save to file."""
+        if not YT_DLP_AVAILABLE:
+            messagebox.showerror("yt-dlp chưa cài", "Chạy: pip install yt-dlp")
+            return
+
+        browsers = ["chrome", "edge", "firefox", "chromium", "brave", "opera"]
+        cookie_path = os.path.join(_THIS_DIR, "yt_cookies_auto.txt")
+
+        def _do_export():
+            for browser in browsers:
+                try:
+                    self._yt_set_status(f"🍪 Đang lấy cookies từ {browser}…",
+                                        self.colors['primary'])
+                    # Use yt-dlp's built-in browser cookie extractor to write a cookies.txt
+                    import yt_dlp.cookies as _ydlp_cookies
+                    jar = _ydlp_cookies.extract_cookies_from_browser(
+                        browser, profile=None, logger=None, keyring=None
+                    )
+                    # Filter to YouTube domains only and write Netscape format
+                    yt_domains = (".youtube.com", ".youtu.be", "youtube.com")
+                    lines = ["# Netscape HTTP Cookie File\n"]
+                    for cookie in jar:
+                        if any(cookie.domain.endswith(d) for d in yt_domains):
+                            flag = "TRUE" if cookie.domain.startswith(".") else "FALSE"
+                            secure = "TRUE" if cookie.secure else "FALSE"
+                            exp = int(cookie.expires) if cookie.expires else 0
+                            lines.append(
+                                f"{cookie.domain}\t{flag}\t{cookie.path}\t"
+                                f"{secure}\t{exp}\t{cookie.name}\t{cookie.value}\n"
+                            )
+                    if len(lines) <= 1:
+                        raise ValueError("No YouTube cookies found")
+                    with open(cookie_path, "w", encoding="utf-8") as f:
+                        f.writelines(lines)
+                    # Update UI
+                    self.root.after(0, lambda b=browser: (
+                        self.yt_cookies_var.set(cookie_path),
+                        self._yt_set_status(
+                            f"✅ Đã import cookies từ {b} ({len(lines)-1} cookies)",
+                            self.colors['secondary']),
+                        messagebox.showinfo(
+                            "Cookie OK",
+                            f"✅ Đã lấy {len(lines)-1} cookies từ {b}\n\n"
+                            f"Lưu tại: {cookie_path}\n\n"
+                            "Thử tải lại video nhé!"
+                        )
+                    ))
+                    return
+                except Exception as e:
+                    print(f"[cookie] {browser}: {e}")
+                    continue
+            # All browsers failed
+            self.root.after(0, lambda: (
+                self._yt_set_status("❌ Không lấy được cookies từ browser", self.colors['danger']),
+                messagebox.showerror(
+                    "Không lấy được cookies",
+                    "Không tìm thấy cookies YouTube trong Chrome/Edge/Firefox.\n\n"
+                    "Cách thủ công:\n"
+                    "1. Cài extension 'Get cookies.txt LOCALLY' trên Chrome\n"
+                    "2. Vào youtube.com (đã đăng nhập)\n"
+                    "3. Click extension → Export\n"
+                    "4. Chọn file .txt vừa export qua nút Browse"
+                )
+            ))
+
+        threading.Thread(target=_do_export, daemon=True).start()
 
     def _yt_view_history(self):
         if not os.path.exists(YT_HISTORY_FILE):
@@ -1945,8 +2023,13 @@ class DouyinYouTubeTool:
             return table[quality][0] if is_yt else table[quality][1]
         return "bestvideo+bestaudio/best" if is_yt else "best"
 
-    def _yt_build_opts(self, fmt: str, output_dir: str) -> dict:
-        """Build yt-dlp options dict."""
+    def _yt_build_opts(self, fmt: str, output_dir: str,
+                       extra: dict | None = None) -> dict:
+        """Build yt-dlp options dict.
+
+        extra — optional overrides / additions merged on top (e.g. for
+                forcing a specific player_client or cookiesfrombrowser).
+        """
         os.makedirs(output_dir, exist_ok=True)
         opts = {
             "format": fmt,
@@ -1957,6 +2040,12 @@ class DouyinYouTubeTool:
             "quiet": True,
             "no_warnings": False,
             "progress_hooks": [self._yt_progress_hook],
+            # Use Android + web player clients by default to bypass bot-check
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android", "web"],
+                }
+            },
             "http_headers": {
                 "User-Agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1973,12 +2062,15 @@ class DouyinYouTubeTool:
         # Node.js (n-challenge solver)
         if NODE_PATH:
             opts["js_runtimes"] = {"node": {"path": NODE_PATH}}
-        # Cookies
+        # Cookies file (manually chosen)
         cookies = self.yt_cookies_var.get().strip() if hasattr(self, 'yt_cookies_var') else ""
         if cookies:
             if not os.path.exists(cookies):
                 raise RuntimeError(f"Cookies file không tồn tại: {cookies}")
             opts["cookiefile"] = cookies
+        # Merge caller-supplied overrides last
+        if extra:
+            opts.update(extra)
         return opts
 
     def _yt_progress_hook(self, d: dict):
@@ -2022,27 +2114,64 @@ class DouyinYouTubeTool:
             return title
 
     def _yt_download_single(self, url: str, quality: str) -> str:
-        """Download one video with 3-level fallback. Returns title."""
+        """Download one video with multi-level fallback. Returns title.
+
+        Fallback order (YouTube-specific bot-check bypass):
+          1. Chosen quality  + android+web clients   (default, no cookies needed)
+          2. best            + android+web clients
+          3. best            + mweb client
+          4. best            + cookiesfrombrowser: chrome  (if available)
+          5. best            + cookiesfrombrowser: edge    (if available)
+          6. best            + cookiesfrombrowser: firefox (if available)
+        For non-YouTube platforms only fallbacks 1-3 run.
+        """
         platform = self._yt_get_platform(url)
         output_dir = self.yt_output_dir_var.get().strip() or self.yt_output_dir
-        fallbacks = [
-            self._yt_format_for_quality(quality, platform),
-            "bestvideo+bestaudio/best",
-            "bestvideo*+bestaudio*/best*",
+
+        # (format_string, extra_opts_override)
+        steps: list[tuple[str, dict]] = [
+            (self._yt_format_for_quality(quality, platform), {}),
+            ("bestvideo+bestaudio/best",  {}),
+            ("bestvideo*+bestaudio*/best*",
+             {"extractor_args": {"youtube": {"player_client": ["mweb"]}}}),
         ]
+
+        # For YouTube: add browser-cookie fallbacks automatically
+        if platform == "youtube":
+            no_merge = "best"   # simpler format avoids ffmpeg requirement
+            for browser in ("chrome", "edge", "firefox", "chromium"):
+                steps.append((no_merge, {"cookiesfrombrowser": (browser,)}))
+
         last_err = None
-        for attempt, fmt in enumerate(fallbacks, 1):
+        total = len(steps)
+        for attempt, (fmt, extra) in enumerate(steps, 1):
+            label = extra.get("cookiesfrombrowser", ("",))[0] or "android/web"
             try:
                 self._yt_set_status(
-                    f"⬇ Attempt {attempt}/3: {url[:60]}…", self.colors['primary'])
-                opts = self._yt_build_opts(fmt, output_dir)
+                    f"⬇ [{attempt}/{total}] {label}: {url[:55]}…",
+                    self.colors['primary'])
+                opts = self._yt_build_opts(fmt, output_dir, extra)
                 title = self._yt_run_download(opts, url)
+                if attempt > 1:
+                    print(f"[yt-dlp] succeeded on attempt {attempt} ({label})")
                 return title
             except Exception as e:
                 last_err = e
-                print(f"[yt-dlp] attempt {attempt} failed: {e}")
+                err_str = str(e)
+                # Only continue to next fallback for bot/sign-in errors
+                bot_error = any(k in err_str.lower() for k in
+                                ("sign in", "bot", "confirm", "cookies", "403",
+                                 "login", "private", "unavailable"))
+                print(f"[yt-dlp] attempt {attempt}/{total} ({label}) failed: {err_str[:120]}")
+                if not bot_error and attempt <= 3:
+                    # Non-auth error on first 3 tries → stop early
+                    break
                 time.sleep(1)
-        raise RuntimeError(f"Tất cả {len(fallbacks)} lần thử đều thất bại: {last_err}")
+
+        raise RuntimeError(f"Tất cả {len(steps)} lần thử đều thất bại.\n\n"
+                           f"Lỗi cuối: {last_err}\n\n"
+                           f"💡 Giải pháp: Nhấn '🍪 Auto từ Browser' để import cookies\n"
+                           f"   hoặc dùng Browse để chọn file cookies.txt")
 
     def _yt_get_video_urls(self, url: str) -> list:
         """Extract list of video URLs (handles playlists)."""
@@ -2054,6 +2183,8 @@ class DouyinYouTubeTool:
             "no_warnings": True,
             "extract_flat": True,
             "skip_download": True,
+            # Use android client to reduce bot-check on metadata extraction too
+            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
         }
         if cookies and os.path.exists(cookies):
             opts["cookiefile"] = cookies
