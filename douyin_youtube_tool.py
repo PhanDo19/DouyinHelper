@@ -2061,27 +2061,27 @@ class DouyinYouTubeTool:
                     "Lỗi", f"Không khởi động được {browser_name}. Thử lại."))
                 return
 
-            # Show "ready" dialog
-            self._yt_set_status("⏳ Chờ xác nhận từ bạn…", self.colors['accent'])
-            confirmed = {"val": None}
+            # Show "ready" dialog — use threading.Event to properly sync
+            self._yt_set_status("⏳ Chrome đã mở — hãy xác nhận trong hộp thoại…",
+                                 self.colors['accent'])
+            event    = threading.Event()
+            result   = {"val": False}
 
             def _ask():
-                confirmed["val"] = messagebox.askyesno(
+                result["val"] = messagebox.askyesno(
                     "Xác nhận lấy Cookie",
                     f"{browser_name} đã mở YouTube với profile của bạn.\n\n"
-                    f"• Nếu bạn đã đăng nhập YouTube → nhấn YES để lấy cookies\n"
-                    f"• Nếu chưa đăng nhập → đăng nhập trong cửa sổ đó rồi nhấn YES\n"
+                    f"• Đã đăng nhập YouTube rồi → nhấn YES để lấy cookies ngay\n"
+                    f"• Chưa đăng nhập → đăng nhập trong cửa sổ Chrome đó, "
+                    f"rồi quay lại nhấn YES\n"
                     f"• Nhấn NO để huỷ"
                 )
-            self.root.after(0, _ask)
+                event.set()   # unblock the background thread
 
-            # Wait for user response (max 5 min)
-            for _ in range(300):
-                time.sleep(1)
-                if confirmed["val"] is not None:
-                    break
+            self.root.after(100, _ask)   # schedule on main thread
+            event.wait(timeout=300)      # block background thread, max 5 min
 
-            if not confirmed["val"]:
+            if not result["val"]:
                 proc.terminate()
                 self._yt_set_status("❌ Huỷ lấy cookie", self.colors['danger'])
                 return
