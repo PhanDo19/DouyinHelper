@@ -2064,21 +2064,29 @@ class DouyinYouTubeTool:
             # Show "ready" dialog — use threading.Event to properly sync
             self._yt_set_status("⏳ Chrome đã mở — hãy xác nhận trong hộp thoại…",
                                  self.colors['accent'])
-            event    = threading.Event()
-            result   = {"val": False}
+            event  = threading.Event()
+            result = {"val": False}
 
             def _ask():
+                # Bring app window to foreground so dialog is visible
+                try:
+                    self.root.lift()
+                    self.root.focus_force()
+                    self.root.attributes("-topmost", True)
+                    self.root.after(200, lambda: self.root.attributes("-topmost", False))
+                except Exception:
+                    pass
                 result["val"] = messagebox.askyesno(
                     "Xác nhận lấy Cookie",
                     f"{browser_name} đã mở YouTube với profile của bạn.\n\n"
                     f"• Đã đăng nhập YouTube rồi → nhấn YES để lấy cookies ngay\n"
-                    f"• Chưa đăng nhập → đăng nhập trong cửa sổ Chrome đó, "
-                    f"rồi quay lại nhấn YES\n"
+                    f"• Chưa đăng nhập → đăng nhập trong cửa sổ Chrome đó,\n"
+                    f"  rồi quay lại đây nhấn YES\n\n"
                     f"• Nhấn NO để huỷ"
                 )
                 event.set()   # unblock the background thread
 
-            self.root.after(100, _ask)   # schedule on main thread
+            self.root.after(2000, _ask)  # 2s delay — wait for Chrome to fully open
             event.wait(timeout=300)      # block background thread, max 5 min
 
             if not result["val"]:
