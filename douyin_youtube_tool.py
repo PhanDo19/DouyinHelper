@@ -1920,54 +1920,132 @@ class DouyinYouTubeTool:
         with open(path, "w", encoding="utf-8") as f:
             f.writelines(lines)
 
+    @staticmethod
+    def _get_real_chrome_user_data() -> tuple[str, str]:
+        """Return (chrome_exe, user_data_dir) for the first installed Chromium browser."""
+        local = os.environ.get("LOCALAPPDATA", "")
+        candidates = [
+            (r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+             os.path.join(local, "Google", "Chrome", "User Data")),
+            (os.path.join(local, "Google", "Chrome", "Application", "chrome.exe"),
+             os.path.join(local, "Google", "Chrome", "User Data")),
+            (r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+             os.path.join(local, "Microsoft", "Edge", "User Data")),
+            (r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+             os.path.join(local, "Microsoft", "Edge", "User Data")),
+        ]
+        for exe, udd in candidates:
+            if os.path.exists(exe) and os.path.isdir(udd):
+                return exe, udd
+        return "", ""
+
+    @staticmethod
+    def _chrome_is_running() -> list[int]:
+        """Return PIDs of running Chrome/Edge processes (empty = not running)."""
+        import subprocess
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq chrome.exe",
+             "/FI", "STATUS eq RUNNING", "/NH", "/FO", "CSV"],
+            capture_output=True, text=True
+        )
+        pids = []
+        for line in result.stdout.splitlines():
+            parts = line.strip().strip('"').split('","')
+            if len(parts) >= 2:
+                try:
+                    pids.append(int(parts[1]))
+                except ValueError:
+                    pass
+        # Also check msedge
+        result2 = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq msedge.exe", "/NH", "/FO", "CSV"],
+            capture_output=True, text=True
+        )
+        for line in result2.stdout.splitlines():
+            parts = line.strip().strip('"').split('","')
+            if len(parts) >= 2:
+                try:
+                    pids.append(int(parts[1]))
+                except ValueError:
+                    pass
+        return pids
+
+    @staticmethod
+    def _kill_chrome():
+        """Terminate all Chrome/Edge processes."""
+        import subprocess
+        subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"],
+                       capture_output=True)
+        subprocess.run(["taskkill", "/F", "/IM", "msedge.exe"],
+                       capture_output=True)
+
     def _yt_auto_cookie_from_browser(self):
-        """Open Chrome → user logs into YouTube → app extracts cookies via CDP."""
-        chrome = self._find_chrome_exe()
-        if not chrome:
+        """Open Chrome with real profile (already logged in) → extract cookies via CDP."""
+        chrome_exe, user_data_dir = self._get_real_chrome_user_data()
+        if not chrome_exe:
             messagebox.showerror(
                 "Không tìm thấy Chrome/Edge",
-                "Không tìm thấy Chrome hoặc Edge.\n"
+                "Không tìm thấy Chrome hoặc Edge trên máy.\n"
                 "Hãy dùng nút Browse để chọn file cookies.txt thủ công."
             )
             return
 
-        # Show instruction dialog (blocks until user clicks OK/Cancel)
-        proceed = messagebox.askyesno(
-            "Lấy Cookie YouTube",
-            "App sẽ mở một cửa sổ Chrome mới.\n\n"
-            "Bước 1: Đăng nhập tài khoản Google/YouTube trong cửa sổ đó\n"
-            "Bước 2: Sau khi đăng nhập xong → quay lại đây nhấn OK\n\n"
-            "Nhấn OK để mở Chrome?"
-        )
-        if not proceed:
-            return
+        browser_name = "Chrome" if "chrome" in chrome_exe.lower() else "Edge"
+        cookie_path  = os.path.join(_THIS_DIR, "yt_cookies_auto.txt")
+        CDP_PORT     = 9229
 
-        cookie_path = os.path.join(_THIS_DIR, "yt_cookies_auto.txt")
+        # ── Detect if browser is currently running ──────────────────────────
+        running_pids = self._chrome_is_running()
+        need_close   = bool(running_pids)
+
+        if need_close:
+            choice = messagebox.askyesno(
+                f"{browser_name} đang mở",
+                f"{browser_name} đang chạy ({len(running_pids)} process).\n\n"
+                f"App cần đóng {browser_name} tạm thời để mở với profile đã đăng nhập.\n"
+                f"Sau khi lấy xong cookies, bạn có thể mở lại {browser_name} bình thường.\n\n"
+                f"⚠️  Hãy lưu công việc đang làm trong {browser_name} trước!\n\n"
+                f"Đóng {browser_name} ngay bây giờ?"
+            )
+            if not choice:
+                return
+        else:
+            proceed = messagebox.askyesno(
+                "Lấy Cookie YouTube",
+                f"App sẽ mở {browser_name} với profile hiện tại của bạn.\n\n"
+                f"Vì bạn đã đăng nhập YouTube trong {browser_name}, "
+                f"app sẽ lấy cookies ngay mà không cần đăng nhập lại.\n\n"
+                f"Tiếp tục?"
+            )
+            if not proceed:
+                return
 
         def _do_cdp():
-            import subprocess, tempfile, time, urllib.request, json
+            import subprocess, time, urllib.request
 
-            CDP_PORT = 9229
-            tmp_profile = tempfile.mkdtemp(prefix="yt_cookie_")
+            # Close Chrome if running
+            if need_close:
+                self._yt_set_status(f"🔄 Đang đóng {browser_name}…", self.colors['accent'])
+                self._kill_chrome()
+                time.sleep(2)   # wait for processes to exit
 
-            # Launch Chrome with debug port + YouTube login
+            # Launch Chrome with REAL user data dir + debug port
+            self._yt_set_status(f"🌐 Đang mở {browser_name} với profile của bạn…",
+                                 self.colors['primary'])
             cmd = [
-                chrome,
+                chrome_exe,
                 f"--remote-debugging-port={CDP_PORT}",
                 "--no-first-run",
                 "--no-default-browser-check",
-                "--disable-sync",
-                f"--user-data-dir={tmp_profile}",
-                "https://accounts.google.com/ServiceLogin"
-                "?service=youtube&continue=https://www.youtube.com",
+                f"--user-data-dir={user_data_dir}",
+                "--profile-directory=Default",
+                "https://www.youtube.com",
             ]
-            self._yt_set_status("🌐 Đang mở Chrome… hãy đăng nhập YouTube",
-                                 self.colors['primary'])
             proc = subprocess.Popen(cmd)
 
-            # Wait for Chrome to start (max 10s)
+            # Wait for Chrome to start (max 15s)
             started = False
-            for _ in range(20):
+            for _ in range(30):
                 time.sleep(0.5)
                 try:
                     urllib.request.urlopen(
@@ -1979,62 +2057,59 @@ class DouyinYouTubeTool:
 
             if not started:
                 proc.terminate()
-                shutil.rmtree(tmp_profile, ignore_errors=True)
                 self.root.after(0, lambda: messagebox.showerror(
-                    "Lỗi", "Không khởi động được Chrome. Thử lại hoặc dùng Browse."))
+                    "Lỗi", f"Không khởi động được {browser_name}. Thử lại."))
                 return
 
-            # Wait for user to log in and click OK
-            self._yt_set_status("⏳ Chờ bạn đăng nhập YouTube…", self.colors['accent'])
-            logged_in = {"val": False}
+            # Show "ready" dialog
+            self._yt_set_status("⏳ Chờ xác nhận từ bạn…", self.colors['accent'])
+            confirmed = {"val": None}
 
-            def _ask_done():
-                logged_in["val"] = messagebox.askyesno(
-                    "Đã đăng nhập chưa?",
-                    "Bạn đã đăng nhập YouTube trong cửa sổ Chrome chưa?\n\n"
-                    "Nhấn YES sau khi đăng nhập xong.\n"
-                    "Nhấn NO để huỷ."
+            def _ask():
+                confirmed["val"] = messagebox.askyesno(
+                    "Xác nhận lấy Cookie",
+                    f"{browser_name} đã mở YouTube với profile của bạn.\n\n"
+                    f"• Nếu bạn đã đăng nhập YouTube → nhấn YES để lấy cookies\n"
+                    f"• Nếu chưa đăng nhập → đăng nhập trong cửa sổ đó rồi nhấn YES\n"
+                    f"• Nhấn NO để huỷ"
                 )
+            self.root.after(0, _ask)
 
-            self.root.after(0, _ask_done)
-
-            # Wait up to 5 min for the dialog to be answered
+            # Wait for user response (max 5 min)
             for _ in range(300):
                 time.sleep(1)
-                if logged_in["val"] is not False:
+                if confirmed["val"] is not None:
                     break
 
-            if not logged_in["val"]:
+            if not confirmed["val"]:
                 proc.terminate()
-                shutil.rmtree(tmp_profile, ignore_errors=True)
                 self._yt_set_status("❌ Huỷ lấy cookie", self.colors['danger'])
                 return
 
-            # Extract cookies via CDP
+            # ── Extract cookies via CDP ──────────────────────────────────────
             try:
                 self._yt_set_status("🍪 Đang lấy cookies…", self.colors['primary'])
                 raw_cookies = self._cdp_get_cookies(CDP_PORT, timeout=10)
 
-                yt_domains = {".youtube.com", "youtube.com", ".youtu.be",
-                              ".google.com", "accounts.google.com"}
-                cookies = [
+                yt_cookies = [
                     c for c in raw_cookies
-                    if any(c.get("domain", "").endswith(d.lstrip("."))
-                           or c.get("domain", "") in yt_domains
-                           for d in yt_domains)
+                    if "youtube" in c.get("domain", "")
+                    or "google" in c.get("domain", "")
                 ]
 
-                if not cookies:
-                    raise ValueError("Không tìm thấy cookie YouTube — chưa đăng nhập?")
+                if not yt_cookies:
+                    raise ValueError(
+                        "Không tìm thấy cookie YouTube.\n"
+                        "Hãy đảm bảo bạn đã đăng nhập YouTube trong cửa sổ Chrome vừa mở."
+                    )
 
                 # Write Netscape format
                 lines = ["# Netscape HTTP Cookie File\n"]
-                for c in cookies:
+                for c in yt_cookies:
                     domain = c.get("domain", "")
                     flag   = "TRUE" if domain.startswith(".") else "FALSE"
                     secure = "TRUE" if c.get("secure") else "FALSE"
-                    exp    = int(c.get("expires", 0))
-                    exp    = max(0, exp)
+                    exp    = max(0, int(c.get("expires", 0)))
                     lines.append(
                         f"{domain}\t{flag}\t{c.get('path','/')}\t"
                         f"{secure}\t{exp}\t{c.get('name','')}\t{c.get('value','')}\n"
@@ -2046,13 +2121,13 @@ class DouyinYouTubeTool:
                 self.root.after(0, lambda n=count: [
                     self.yt_cookies_var.set(cookie_path),
                     self._yt_set_status(
-                        f"✅ Đã lấy {n} cookies YouTube",
+                        f"✅ Đã lấy {n} cookies YouTube từ {browser_name}",
                         self.colors['secondary']),
                     messagebox.showinfo(
                         "Cookie OK",
-                        f"✅ Lấy thành công {n} cookies!\n\n"
+                        f"✅ Lấy thành công {n} cookies từ {browser_name}!\n\n"
                         f"File: {cookie_path}\n\n"
-                        "Thử tải lại video nhé!"
+                        f"Thử tải lại video nhé!"
                     )
                 ])
 
@@ -2063,8 +2138,6 @@ class DouyinYouTubeTool:
                 ])
             finally:
                 proc.terminate()
-                time.sleep(1)
-                shutil.rmtree(tmp_profile, ignore_errors=True)
 
         threading.Thread(target=_do_cdp, daemon=True).start()
 
