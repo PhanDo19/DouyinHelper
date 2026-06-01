@@ -1709,101 +1709,364 @@ class DouyinYouTubeTool:
         if path:
             self.yt_cookies_var.set(path)
 
+    # ── Cookie extraction helpers ─────────────────────────────────────────────
+
+    # Chrome v127+ uses App-Bound Encryption (v20) — can't decrypt outside process.
+    # We use Chrome DevTools Protocol (CDP) instead: launch a Chrome window,
+    # user logs in, we call Storage.getCookies via WebSocket CDP.
+
+    @staticmethod
+    def _find_chrome_exe() -> str | None:
+        """Return path to Chrome or Edge executable, or None."""
+        candidates = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                         "Google", "Chrome", "Application", "chrome.exe"),
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        ]
+        for p in candidates:
+            if os.path.exists(p):
+                return p
+        # Try PATH
+        found = shutil.which("chrome") or shutil.which("msedge")
+        return found
+
+    @staticmethod
+    def _cdp_get_cookies(port: int, timeout: int = 60) -> list[dict]:
+        """Connect to Chrome via CDP WebSocket and return all cookies."""
+        import urllib.request, socket, struct, json as _json, os as _os
+
+        # Get WebSocket URL from CDP HTTP endpoint
+        resp = urllib.request.urlopen(
+            f"http://localhost:{port}/json/version", timeout=5)
+        info = _json.loads(resp.read())
+        ws_url: str = info["webSocketDebuggerUrl"]
+        ws_path = ws_url.split(f"localhost:{port}", 1)[1]
+
+        # Raw WebSocket handshake (no external deps)
+        sock = socket.create_connection(("localhost", port), timeout=timeout)
+        key = __import__("base64").b64encode(_os.urandom(16)).decode()
+        handshake = (
+            f"GET {ws_path} HTTP/1.1\r\n"
+            f"Host: localhost:{port}\r\n"
+            f"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        )
+        sock.send(handshake.encode())
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            buf += sock.recv(4096)
+
+        def _ws_send(data: dict):
+            payload = _json.dumps(data).encode()
+            mask = _os.urandom(4)
+            n = len(payload)
+            masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+            header = b"\x81"
+            if n < 126:
+                header += bytes([n | 0x80]) + mask
+            elif n < 65536:
+                header += bytes([126 | 0x80]) + struct.pack(">H", n) + mask
+            else:
+                header += bytes([127 | 0x80]) + struct.pack(">Q", n) + mask
+            sock.send(header + masked)
+
+        def _ws_recv() -> dict:
+            def _read(n):
+                d = b""
+                while len(d) < n:
+                    d += sock.recv(n - len(d))
+                return d
+            b0, b1 = _read(2)
+            n = b1 & 0x7f
+            if n == 126:
+                n = struct.unpack(">H", _read(2))[0]
+            elif n == 127:
+                n = struct.unpack(">Q", _read(8))[0]
+            return _json.loads(_read(n).decode())
+
+        _ws_send({"id": 1, "method": "Storage.getCookies"})
+        for _ in range(200):   # up to 200 messages
+            msg = _ws_recv()
+            if msg.get("id") == 1:
+                sock.close()
+                return msg.get("result", {}).get("cookies", [])
+        sock.close()
+        return []
+
+    @staticmethod
+    def _dpapi_decrypt(ciphertext: bytes) -> bytes:
+        """Decrypt bytes using Windows DPAPI (CryptUnprotectData)."""
+        import ctypes, ctypes.wintypes
+        class DATA_BLOB(ctypes.Structure):
+            _fields_ = [("cbData", ctypes.wintypes.DWORD),
+                        ("pbData", ctypes.POINTER(ctypes.c_char))]
+        p = ctypes.create_string_buffer(ciphertext, len(ciphertext))
+        blobin  = DATA_BLOB(len(ciphertext), p)
+        blobout = DATA_BLOB()
+        retval  = ctypes.windll.crypt32.CryptUnprotectData(
+            ctypes.byref(blobin), None, None, None, None, 0,
+            ctypes.byref(blobout))
+        if not retval:
+            raise RuntimeError("DPAPI decryption failed")
+        result = ctypes.string_at(blobout.pbData, blobout.cbData)
+        ctypes.windll.kernel32.LocalFree(blobout.pbData)
+        return result
+
+    @staticmethod
+    def _chrome_decrypt_value(encrypted_value: bytes, aes_key: bytes) -> str:
+        """Decrypt a single Chrome cookie value."""
+        if not encrypted_value:
+            return ""
+        # v10 / v11 → AES-256-GCM
+        if encrypted_value[:3] in (b"v10", b"v11"):
+            try:
+                from Crypto.Cipher import AES as _AES
+                nonce      = encrypted_value[3:15]        # 12 bytes
+                ciphertext = encrypted_value[15:-16]
+                tag        = encrypted_value[-16:]
+                cipher = _AES.new(aes_key, _AES.MODE_GCM, nonce=nonce)
+                return cipher.decrypt_and_verify(ciphertext, tag).decode("utf-8", errors="replace")
+            except Exception:
+                return ""
+        # Legacy → DPAPI directly
+        try:
+            return DouyinYouTubeTool._dpapi_decrypt(encrypted_value).decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+    def _extract_chrome_cookies_direct(self, browser: str) -> list[dict]:
+        """Read Chrome/Edge cookies directly via SQLite immutable=1 (works while browser is open).
+        Returns list of dicts with keys: domain, path, secure, expires, name, value.
+        """
+        import sqlite3, json, base64
+
+        # Locate profile dirs for known Chromium browsers
+        local = os.environ.get("LOCALAPPDATA", "")
+        roaming = os.environ.get("APPDATA", "")
+        profile_dirs = {
+            "chrome":   os.path.join(local,   "Google",    "Chrome",   "User Data"),
+            "edge":     os.path.join(local,   "Microsoft", "Edge",     "User Data"),
+            "chromium": os.path.join(local,   "Chromium",  "User Data"),
+            "brave":    os.path.join(local,   "BraveSoftware", "Brave-Browser", "User Data"),
+            "opera":    os.path.join(roaming, "Opera Software", "Opera Stable"),
+            "vivaldi":  os.path.join(local,   "Vivaldi",   "User Data"),
+        }
+
+        user_data = profile_dirs.get(browser.lower())
+        if not user_data or not os.path.isdir(user_data):
+            raise FileNotFoundError(f"{browser} profile not found")
+
+        # Decrypt master key (DPAPI + base64)
+        local_state_path = os.path.join(user_data, "Local State")
+        with open(local_state_path, encoding="utf-8") as f:
+            local_state = json.load(f)
+        enc_key_b64 = local_state["os_crypt"]["encrypted_key"]
+        enc_key = base64.b64decode(enc_key_b64)[5:]   # strip "DPAPI" prefix
+        aes_key = self._dpapi_decrypt(enc_key)
+
+        # Find the Cookies database (two possible locations)
+        db_candidates = [
+            os.path.join(user_data, "Default", "Network", "Cookies"),
+            os.path.join(user_data, "Default", "Cookies"),
+        ]
+        db_path = next((p for p in db_candidates if os.path.exists(p)), None)
+        if not db_path:
+            raise FileNotFoundError(f"Cookies database not found for {browser}")
+
+        # Open with immutable=1 — works even while browser is running
+        conn = sqlite3.connect(f"file:{db_path}?immutable=1", uri=True)
+        conn.row_factory = sqlite3.Row
+        yt_domains = (".youtube.com", ".youtu.be", "youtube.com", "accounts.google.com")
+        rows = conn.execute(
+            "SELECT host_key, path, is_secure, expires_utc, name, encrypted_value "
+            "FROM cookies WHERE host_key LIKE '%youtube%' OR host_key LIKE '%google%'"
+        ).fetchall()
+        conn.close()
+
+        cookies = []
+        for row in rows:
+            value = self._chrome_decrypt_value(bytes(row["encrypted_value"]), aes_key)
+            if value:
+                cookies.append({
+                    "domain":  row["host_key"],
+                    "path":    row["path"],
+                    "secure":  bool(row["is_secure"]),
+                    "expires": row["expires_utc"],
+                    "name":    row["name"],
+                    "value":   value,
+                })
+        return cookies
+
+    def _auto_cookie_write_netscape(self, cookies: list[dict], path: str):
+        """Write cookie list to Netscape cookies.txt format."""
+        lines = ["# Netscape HTTP Cookie File\n"]
+        for c in cookies:
+            flag   = "TRUE" if c["domain"].startswith(".") else "FALSE"
+            secure = "TRUE" if c["secure"] else "FALSE"
+            # Chrome stores expiry as microseconds since 1601-01-01; convert to Unix epoch
+            exp = c["expires"]
+            if exp and exp > 0:
+                unix_exp = (exp // 1_000_000) - 11_644_473_600
+                unix_exp = max(0, unix_exp)
+            else:
+                unix_exp = 0
+            lines.append(
+                f"{c['domain']}\t{flag}\t{c['path']}\t"
+                f"{secure}\t{unix_exp}\t{c['name']}\t{c['value']}\n"
+            )
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+
     def _yt_auto_cookie_from_browser(self):
-        """Export YouTube cookies from the first available browser and save to file."""
-        if not YT_DLP_AVAILABLE:
-            messagebox.showerror("yt-dlp chưa cài", "Chạy: pip install yt-dlp")
+        """Open Chrome → user logs into YouTube → app extracts cookies via CDP."""
+        chrome = self._find_chrome_exe()
+        if not chrome:
+            messagebox.showerror(
+                "Không tìm thấy Chrome/Edge",
+                "Không tìm thấy Chrome hoặc Edge.\n"
+                "Hãy dùng nút Browse để chọn file cookies.txt thủ công."
+            )
             return
 
-        browsers = ["chrome", "edge", "firefox", "chromium", "brave", "opera"]
+        # Show instruction dialog (blocks until user clicks OK/Cancel)
+        proceed = messagebox.askyesno(
+            "Lấy Cookie YouTube",
+            "App sẽ mở một cửa sổ Chrome mới.\n\n"
+            "Bước 1: Đăng nhập tài khoản Google/YouTube trong cửa sổ đó\n"
+            "Bước 2: Sau khi đăng nhập xong → quay lại đây nhấn OK\n\n"
+            "Nhấn OK để mở Chrome?"
+        )
+        if not proceed:
+            return
+
         cookie_path = os.path.join(_THIS_DIR, "yt_cookies_auto.txt")
 
-        def _do_export():
-            import yt_dlp.cookies as _ydlp_cookies
-            locked_browsers = []   # browsers found but database locked
-            missing_browsers = []  # browsers not installed
+        def _do_cdp():
+            import subprocess, tempfile, time, urllib.request, json
 
-            for browser in browsers:
+            CDP_PORT = 9229
+            tmp_profile = tempfile.mkdtemp(prefix="yt_cookie_")
+
+            # Launch Chrome with debug port + YouTube login
+            cmd = [
+                chrome,
+                f"--remote-debugging-port={CDP_PORT}",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-sync",
+                f"--user-data-dir={tmp_profile}",
+                "https://accounts.google.com/ServiceLogin"
+                "?service=youtube&continue=https://www.youtube.com",
+            ]
+            self._yt_set_status("🌐 Đang mở Chrome… hãy đăng nhập YouTube",
+                                 self.colors['primary'])
+            proc = subprocess.Popen(cmd)
+
+            # Wait for Chrome to start (max 10s)
+            started = False
+            for _ in range(20):
+                time.sleep(0.5)
                 try:
-                    self._yt_set_status(f"🍪 Đang lấy cookies từ {browser}…",
-                                        self.colors['primary'])
-                    jar = _ydlp_cookies.extract_cookies_from_browser(
-                        browser, profile=None, logger=None, keyring=None
+                    urllib.request.urlopen(
+                        f"http://localhost:{CDP_PORT}/json/version", timeout=1)
+                    started = True
+                    break
+                except Exception:
+                    pass
+
+            if not started:
+                proc.terminate()
+                shutil.rmtree(tmp_profile, ignore_errors=True)
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Lỗi", "Không khởi động được Chrome. Thử lại hoặc dùng Browse."))
+                return
+
+            # Wait for user to log in and click OK
+            self._yt_set_status("⏳ Chờ bạn đăng nhập YouTube…", self.colors['accent'])
+            logged_in = {"val": False}
+
+            def _ask_done():
+                logged_in["val"] = messagebox.askyesno(
+                    "Đã đăng nhập chưa?",
+                    "Bạn đã đăng nhập YouTube trong cửa sổ Chrome chưa?\n\n"
+                    "Nhấn YES sau khi đăng nhập xong.\n"
+                    "Nhấn NO để huỷ."
+                )
+
+            self.root.after(0, _ask_done)
+
+            # Wait up to 5 min for the dialog to be answered
+            for _ in range(300):
+                time.sleep(1)
+                if logged_in["val"] is not False:
+                    break
+
+            if not logged_in["val"]:
+                proc.terminate()
+                shutil.rmtree(tmp_profile, ignore_errors=True)
+                self._yt_set_status("❌ Huỷ lấy cookie", self.colors['danger'])
+                return
+
+            # Extract cookies via CDP
+            try:
+                self._yt_set_status("🍪 Đang lấy cookies…", self.colors['primary'])
+                raw_cookies = self._cdp_get_cookies(CDP_PORT, timeout=10)
+
+                yt_domains = {".youtube.com", "youtube.com", ".youtu.be",
+                              ".google.com", "accounts.google.com"}
+                cookies = [
+                    c for c in raw_cookies
+                    if any(c.get("domain", "").endswith(d.lstrip("."))
+                           or c.get("domain", "") in yt_domains
+                           for d in yt_domains)
+                ]
+
+                if not cookies:
+                    raise ValueError("Không tìm thấy cookie YouTube — chưa đăng nhập?")
+
+                # Write Netscape format
+                lines = ["# Netscape HTTP Cookie File\n"]
+                for c in cookies:
+                    domain = c.get("domain", "")
+                    flag   = "TRUE" if domain.startswith(".") else "FALSE"
+                    secure = "TRUE" if c.get("secure") else "FALSE"
+                    exp    = int(c.get("expires", 0))
+                    exp    = max(0, exp)
+                    lines.append(
+                        f"{domain}\t{flag}\t{c.get('path','/')}\t"
+                        f"{secure}\t{exp}\t{c.get('name','')}\t{c.get('value','')}\n"
                     )
-                    # Filter to YouTube domains only and write Netscape format
-                    yt_domains = (".youtube.com", ".youtu.be", "youtube.com")
-                    lines = ["# Netscape HTTP Cookie File\n"]
-                    for cookie in jar:
-                        if any(cookie.domain.endswith(d) for d in yt_domains):
-                            flag   = "TRUE" if cookie.domain.startswith(".") else "FALSE"
-                            secure = "TRUE" if cookie.secure else "FALSE"
-                            exp    = int(cookie.expires) if cookie.expires else 0
-                            lines.append(
-                                f"{cookie.domain}\t{flag}\t{cookie.path}\t"
-                                f"{secure}\t{exp}\t{cookie.name}\t{cookie.value}\n"
-                            )
-                    if len(lines) <= 1:
-                        raise ValueError("No YouTube cookies found in this browser")
-                    with open(cookie_path, "w", encoding="utf-8") as f:
-                        f.writelines(lines)
-                    count = len(lines) - 1
-                    self.root.after(0, lambda b=browser, n=count: [
-                        self.yt_cookies_var.set(cookie_path),
-                        self._yt_set_status(
-                            f"✅ Đã import {n} cookies từ {b}",
-                            self.colors['secondary']),
-                        messagebox.showinfo(
-                            "Cookie OK",
-                            f"✅ Đã lấy {n} cookies từ {b}\n\n"
-                            f"File: {cookie_path}\n\n"
-                            "Thử tải lại video nhé!"
-                        )
-                    ])
-                    return
+                with open(cookie_path, "w", encoding="utf-8") as f:
+                    f.writelines(lines)
+                count = len(lines) - 1
 
-                except Exception as e:
-                    err = str(e).lower()
-                    if "could not copy" in err or "database is locked" in err or "lock" in err:
-                        locked_browsers.append(browser)
-                    elif "not found" in err or "no such" in err or "unsupported" in err:
-                        missing_browsers.append(browser)
-                    else:
-                        missing_browsers.append(browser)
-                    print(f"[cookie] {browser}: {e}")
+                self.root.after(0, lambda n=count: [
+                    self.yt_cookies_var.set(cookie_path),
+                    self._yt_set_status(
+                        f"✅ Đã lấy {n} cookies YouTube",
+                        self.colors['secondary']),
+                    messagebox.showinfo(
+                        "Cookie OK",
+                        f"✅ Lấy thành công {n} cookies!\n\n"
+                        f"File: {cookie_path}\n\n"
+                        "Thử tải lại video nhé!"
+                    )
+                ])
 
-            # Build helpful error message based on what went wrong
-            self._yt_set_status("❌ Không lấy được cookies", self.colors['danger'])
+            except Exception as e:
+                self.root.after(0, lambda err=str(e): [
+                    self._yt_set_status("❌ Lỗi lấy cookie", self.colors['danger']),
+                    messagebox.showerror("Lỗi Cookie", f"Không lấy được cookie:\n{err}")
+                ])
+            finally:
+                proc.terminate()
+                time.sleep(1)
+                shutil.rmtree(tmp_profile, ignore_errors=True)
 
-            if locked_browsers:
-                # Most common case on Windows: browser is open
-                msg = (
-                    f"❌ {', '.join(locked_browsers).title()} đang mở — "
-                    f"database cookies bị khóa.\n\n"
-                    f"👉 Hãy làm theo các bước sau:\n"
-                    f"  1. ĐÓNG HOÀN TOÀN {', '.join(locked_browsers).upper()}\n"
-                    f"     (kể cả icon dưới taskbar)\n"
-                    f"  2. Nhấn '🍪 Auto từ Browser' lại\n\n"
-                    f"─────────────────────────────\n"
-                    f"Hoặc export thủ công (không cần đóng browser):\n"
-                    f"  1. Cài extension 'Get cookies.txt LOCALLY' trên Chrome\n"
-                    f"  2. Vào youtube.com (đã đăng nhập)\n"
-                    f"  3. Click extension → Export as cookies.txt\n"
-                    f"  4. Nhấn Browse → chọn file vừa export"
-                )
-            else:
-                msg = (
-                    "Không tìm thấy Chrome/Edge/Firefox đã đăng nhập YouTube.\n\n"
-                    "Cách thủ công:\n"
-                    "  1. Cài extension 'Get cookies.txt LOCALLY' trên Chrome\n"
-                    "  2. Vào youtube.com (đã đăng nhập)\n"
-                    "  3. Click extension → Export as cookies.txt\n"
-                    "  4. Nhấn Browse → chọn file vừa export"
-                )
-
-            self.root.after(0, lambda m=msg: messagebox.showerror(
-                "Không lấy được cookies", m))
-
-        threading.Thread(target=_do_export, daemon=True).start()
+        threading.Thread(target=_do_cdp, daemon=True).start()
 
     def _yt_view_history(self):
         if not os.path.exists(YT_HISTORY_FILE):
