@@ -1719,12 +1719,14 @@ class DouyinYouTubeTool:
         cookie_path = os.path.join(_THIS_DIR, "yt_cookies_auto.txt")
 
         def _do_export():
+            import yt_dlp.cookies as _ydlp_cookies
+            locked_browsers = []   # browsers found but database locked
+            missing_browsers = []  # browsers not installed
+
             for browser in browsers:
                 try:
                     self._yt_set_status(f"🍪 Đang lấy cookies từ {browser}…",
                                         self.colors['primary'])
-                    # Use yt-dlp's built-in browser cookie extractor to write a cookies.txt
-                    import yt_dlp.cookies as _ydlp_cookies
                     jar = _ydlp_cookies.extract_cookies_from_browser(
                         browser, profile=None, logger=None, keyring=None
                     )
@@ -1733,47 +1735,73 @@ class DouyinYouTubeTool:
                     lines = ["# Netscape HTTP Cookie File\n"]
                     for cookie in jar:
                         if any(cookie.domain.endswith(d) for d in yt_domains):
-                            flag = "TRUE" if cookie.domain.startswith(".") else "FALSE"
+                            flag   = "TRUE" if cookie.domain.startswith(".") else "FALSE"
                             secure = "TRUE" if cookie.secure else "FALSE"
-                            exp = int(cookie.expires) if cookie.expires else 0
+                            exp    = int(cookie.expires) if cookie.expires else 0
                             lines.append(
                                 f"{cookie.domain}\t{flag}\t{cookie.path}\t"
                                 f"{secure}\t{exp}\t{cookie.name}\t{cookie.value}\n"
                             )
                     if len(lines) <= 1:
-                        raise ValueError("No YouTube cookies found")
+                        raise ValueError("No YouTube cookies found in this browser")
                     with open(cookie_path, "w", encoding="utf-8") as f:
                         f.writelines(lines)
-                    # Update UI
-                    self.root.after(0, lambda b=browser: (
+                    count = len(lines) - 1
+                    self.root.after(0, lambda b=browser, n=count: [
                         self.yt_cookies_var.set(cookie_path),
                         self._yt_set_status(
-                            f"✅ Đã import cookies từ {b} ({len(lines)-1} cookies)",
+                            f"✅ Đã import {n} cookies từ {b}",
                             self.colors['secondary']),
                         messagebox.showinfo(
                             "Cookie OK",
-                            f"✅ Đã lấy {len(lines)-1} cookies từ {b}\n\n"
-                            f"Lưu tại: {cookie_path}\n\n"
+                            f"✅ Đã lấy {n} cookies từ {b}\n\n"
+                            f"File: {cookie_path}\n\n"
                             "Thử tải lại video nhé!"
                         )
-                    ))
+                    ])
                     return
+
                 except Exception as e:
+                    err = str(e).lower()
+                    if "could not copy" in err or "database is locked" in err or "lock" in err:
+                        locked_browsers.append(browser)
+                    elif "not found" in err or "no such" in err or "unsupported" in err:
+                        missing_browsers.append(browser)
+                    else:
+                        missing_browsers.append(browser)
                     print(f"[cookie] {browser}: {e}")
-                    continue
-            # All browsers failed
-            self.root.after(0, lambda: (
-                self._yt_set_status("❌ Không lấy được cookies từ browser", self.colors['danger']),
-                messagebox.showerror(
-                    "Không lấy được cookies",
-                    "Không tìm thấy cookies YouTube trong Chrome/Edge/Firefox.\n\n"
-                    "Cách thủ công:\n"
-                    "1. Cài extension 'Get cookies.txt LOCALLY' trên Chrome\n"
-                    "2. Vào youtube.com (đã đăng nhập)\n"
-                    "3. Click extension → Export\n"
-                    "4. Chọn file .txt vừa export qua nút Browse"
+
+            # Build helpful error message based on what went wrong
+            self._yt_set_status("❌ Không lấy được cookies", self.colors['danger'])
+
+            if locked_browsers:
+                # Most common case on Windows: browser is open
+                msg = (
+                    f"❌ {', '.join(locked_browsers).title()} đang mở — "
+                    f"database cookies bị khóa.\n\n"
+                    f"👉 Hãy làm theo các bước sau:\n"
+                    f"  1. ĐÓNG HOÀN TOÀN {', '.join(locked_browsers).upper()}\n"
+                    f"     (kể cả icon dưới taskbar)\n"
+                    f"  2. Nhấn '🍪 Auto từ Browser' lại\n\n"
+                    f"─────────────────────────────\n"
+                    f"Hoặc export thủ công (không cần đóng browser):\n"
+                    f"  1. Cài extension 'Get cookies.txt LOCALLY' trên Chrome\n"
+                    f"  2. Vào youtube.com (đã đăng nhập)\n"
+                    f"  3. Click extension → Export as cookies.txt\n"
+                    f"  4. Nhấn Browse → chọn file vừa export"
                 )
-            ))
+            else:
+                msg = (
+                    "Không tìm thấy Chrome/Edge/Firefox đã đăng nhập YouTube.\n\n"
+                    "Cách thủ công:\n"
+                    "  1. Cài extension 'Get cookies.txt LOCALLY' trên Chrome\n"
+                    "  2. Vào youtube.com (đã đăng nhập)\n"
+                    "  3. Click extension → Export as cookies.txt\n"
+                    "  4. Nhấn Browse → chọn file vừa export"
+                )
+
+            self.root.after(0, lambda m=msg: messagebox.showerror(
+                "Không lấy được cookies", m))
 
         threading.Thread(target=_do_export, daemon=True).start()
 
