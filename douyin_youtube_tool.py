@@ -2074,7 +2074,7 @@ class DouyinYouTubeTool:
         # Node.js (n-challenge solver)
         if NODE_PATH:
             opts["js_runtimes"] = {"node": {"path": NODE_PATH}}
-        # Cookies file (manually chosen)
+        # Cookies file (manually chosen by user)
         cookies = self.yt_cookies_var.get().strip() if hasattr(self, 'yt_cookies_var') else ""
         if cookies:
             if not os.path.exists(cookies):
@@ -2083,6 +2083,10 @@ class DouyinYouTubeTool:
         # Merge caller-supplied overrides last
         if extra:
             opts.update(extra)
+            # If fallback is using browser cookies, remove any stale cookiefile
+            # so yt-dlp actually uses the browser (not the possibly-expired file)
+            if "cookiesfrombrowser" in extra:
+                opts.pop("cookiefile", None)
         return opts
 
     def _yt_progress_hook(self, d: dict):
@@ -2112,8 +2116,15 @@ class DouyinYouTubeTool:
     def _yt_is_duplicate(self, url: str) -> bool:
         if not os.path.exists(YT_HISTORY_FILE):
             return False
+        url = url.strip()
         with open(YT_HISTORY_FILE, "r", encoding="utf-8") as f:
-            return url in f.read()
+            for line in f:
+                # Each line: "title | url"  — compare the url part exactly
+                parts = line.strip().split(" | ", 1)
+                saved_url = parts[-1].strip()
+                if saved_url == url:
+                    return True
+        return False
 
     def _yt_run_download(self, opts: dict, url: str) -> str:
         """Low-level yt-dlp call. Returns video title. Raises on error."""
@@ -2251,8 +2262,20 @@ class DouyinYouTubeTool:
         quality = self.yt_quality_var.get()
         downloaded, skipped, failed = [], [], []
         try:
-            urls = self._yt_get_video_urls(url)
-            for u in urls:
+            # Try to expand playlist; if metadata extraction fails (e.g. bot-check),
+            # fall back to the original URL — _yt_download_single has its own retry chain.
+            try:
+                urls = self._yt_get_video_urls(url)
+            except Exception as meta_err:
+                print(f"[yt-dlp] metadata extraction failed ({meta_err}), using URL directly")
+                urls = [url]
+
+            total_vids = len(urls)
+            for idx, u in enumerate(urls, 1):
+                if total_vids > 1:
+                    self._yt_set_status(
+                        f"[{idx}/{total_vids}] ⬇ {u[:50]}…", self.colors['primary'])
+                    self._yt_set_progress((idx - 1) / total_vids * 100)
                 if self._yt_is_duplicate(u):
                     skipped.append(u)
                     continue
@@ -2270,7 +2293,7 @@ class DouyinYouTubeTool:
             self.yt_is_downloading = False
             self._yt_set_buttons(True)
             self._yt_set_progress(100 if downloaded else 0)
-            self.root.after(0, self._yt_refresh_dl_list)   # auto-refresh list
+            self.root.after(0, self._yt_refresh_dl_list)
             summary = (f"✅ Đã tải: {len(downloaded)}\n"
                        f"⏭ Bỏ qua (đã có): {len(skipped)}\n"
                        f"❌ Lỗi: {len(failed)}")
@@ -2304,38 +2327,47 @@ class DouyinYouTubeTool:
         self._yt_set_progress(0)
         quality = self.yt_quality_var.get()
         downloaded, skipped, failed = [], [], []
-        total = len(urls)
-        for i, url in enumerate(urls, 1):
-            self._yt_set_status(
-                f"[{i}/{total}] ⬇ {url[:55]}…", self.colors['primary'])
+
+        # Phase 1: expand all URLs (handles playlists) → build a flat work list
+        # [(original_input_url, actual_video_url), ...]
+        work: list[tuple[str, str]] = []
+        for url in urls:
+            try:
+                sub = self._yt_get_video_urls(url)
+            except Exception:
+                sub = [url]   # fall back to direct URL on metadata failure
+            for u in sub:
+                work.append((url, u))
+
+        total = len(work)
+        if total == 0:
+            self.yt_is_downloading = False
+            self._yt_set_buttons(True)
+            self.root.after(0, lambda: messagebox.showinfo(
+                "Không có video", "Không tìm thấy video nào để tải."))
+            return
+
+        # Phase 2: download each video
+        for i, (src_url, u) in enumerate(work, 1):
+            self._yt_set_status(f"[{i}/{total}] ⬇ {u[:55]}…", self.colors['primary'])
             self._yt_set_progress((i - 1) / total * 100)
-            if self._yt_is_duplicate(url):
-                skipped.append(url)
+            if self._yt_is_duplicate(u):
+                skipped.append(u)
                 continue
             try:
-                # Expand playlist if needed
-                try:
-                    sub_urls = self._yt_get_video_urls(url)
-                except Exception:
-                    sub_urls = [url]
-                for u in sub_urls:
-                    if self._yt_is_duplicate(u):
-                        skipped.append(u)
-                        continue
-                    try:
-                        title = self._yt_download_single(u, quality)
-                        downloaded.append(title)
-                    except Exception as e:
-                        failed.append(f"{u}: {e}")
+                title = self._yt_download_single(u, quality)
+                downloaded.append(title)
             except Exception as e:
-                failed.append(f"{url}: {e}")
+                failed.append(f"{u[:60]}: {e}")
+
         self.yt_is_downloading = False
         self._yt_set_buttons(True)
         self._yt_set_progress(100)
         self._yt_set_status(
-            f"✅ Hoàn thành — Đã tải: {len(downloaded)}, Bỏ qua: {len(skipped)}, Lỗi: {len(failed)}",
+            f"✅ Hoàn thành — Đã tải: {len(downloaded)}, "
+            f"Bỏ qua: {len(skipped)}, Lỗi: {len(failed)}",
             self.colors['secondary'])
-        self.root.after(0, self._yt_refresh_dl_list)   # auto-refresh list
+        self.root.after(0, self._yt_refresh_dl_list)
         summary = (f"✅ Đã tải: {len(downloaded)}\n"
                    f"⏭ Bỏ qua (đã có): {len(skipped)}\n"
                    f"❌ Lỗi: {len(failed)}")
