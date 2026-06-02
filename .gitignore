@@ -169,6 +169,10 @@ token.json
 token.pickle
 config.json
 settings.json
+cookies*.txt
+yt_cookies_auto.txt
+.local_secrets/
+.browser-profiles/
 
 # Downloaded files and cache
 downloads/

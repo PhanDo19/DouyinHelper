@@ -25,6 +25,7 @@ import os
 import platform
 import re
 import subprocess
+import tempfile
 import threading
 import time
 import webbrowser
@@ -33,6 +34,9 @@ from urllib.parse import urlparse, parse_qs, urlencode
 import urllib.request
 import urllib.error
 import http.cookiejar
+import http.server
+import mimetypes
+import secrets
 
 
 # Optional browser cookie import
@@ -69,6 +73,7 @@ from tkinter import ttk, messagebox, filedialog, scrolledtext, simpledialog
 YOUTUBE_AVAILABLE = False
 try:
     import googleapiclient.discovery
+    from googleapiclient.discovery import build
     import google.auth
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
@@ -449,7 +454,7 @@ class YouTubeAPI:
                 'error': str(e)
             }
             
-    def upload_video(self, video_file, title, description, tags, category="22", privacy_status="public"):
+    def upload_video(self, video_file, title, description, tags, category="22", privacy_status="public", private_share_emails="", made_for_kids=False):
         """Upload video to YouTube with comprehensive error handling"""
         try:
             if not self.authenticated or not self.service:
@@ -457,7 +462,7 @@ class YouTubeAPI:
                     'success': False,
                     'error': 'Not authenticated with YouTube'
                 }
-            
+
             # Demo mode simulation
             if self.service == 'demo_service':
                 import time
@@ -472,29 +477,37 @@ class YouTubeAPI:
                     'privacy_status': privacy_status,
                     'warning': 'This is a demo upload - not actually uploaded to YouTube'
                 }
-            
+
             # Real YouTube API upload
             if not self.credentials:
                 return {
                     'success': False,
                     'error': 'OAuth credentials required for uploading'
                 }
-                
-            return self._perform_real_upload(video_file, title, description, tags, category, privacy_status)
-            
+
+            return self._perform_real_upload(video_file, title, description, tags, category, privacy_status, private_share_emails, made_for_kids)
+
         except Exception as e:
             return {
                 'success': False,
                 'error': f'Upload failed: {str(e)}'
             }
-    
-    def _perform_real_upload(self, video_file, title, description, tags, category, privacy_status):
+
+    def _log_upload(self, msg):
+        """Print upload progress — app UI can override this via monkey-patch."""
+        print(msg)
+
+    def _perform_real_upload(self, video_file, title, description, tags, category, privacy_status, private_share_emails="", made_for_kids=False):
         """Perform the actual YouTube upload"""
+        import socket
+        import time as _time
+        import requests as _requests
         from googleapiclient.http import MediaFileUpload
-        
+        from googleapiclient.errors import HttpError
+
         # Prepare tags
         tags_list = self._prepare_tags(tags)
-        
+
         # Video metadata
         body = {
             'snippet': {
@@ -504,37 +517,147 @@ class YouTubeAPI:
                 'categoryId': category
             },
             'status': {
-                'privacyStatus': privacy_status
+                'privacyStatus': privacy_status,
+                'selfDeclaredMadeForKids': bool(made_for_kids)
             }
         }
-        
-        # Upload video file
-        media = MediaFileUpload(video_file, chunksize=-1, resumable=True)
-        
-        request = self.service.videos().insert(
+
+        # Choose chunk size based on file size: larger chunks = fewer round-trips
+        file_size = os.path.getsize(video_file)
+        if file_size > 200 * 1024 * 1024:      # > 200 MB → 64 MB chunks
+            chunksize = 1024 * 1024 * 64
+        elif file_size > 50 * 1024 * 1024:     # 50–200 MB → 32 MB chunks
+            chunksize = 1024 * 1024 * 32
+        else:                                   # < 50 MB → 8 MB chunks
+            chunksize = 1024 * 1024 * 8
+        media = MediaFileUpload(video_file, chunksize=chunksize, resumable=True)
+
+        insert_request = self.service.videos().insert(
             part=','.join(body.keys()),
             body=body,
             media_body=media
         )
-        
-        response = request.execute()
-        
-        if response:
-            video_id = response['id']
-            return {
-                'success': True,
-                'video_id': video_id,
-                'title': title,
-                'url': f'https://youtube.com/watch?v={video_id}',
-                'upload_status': 'uploaded',
-                'processing_status': 'processing',
-                'privacy_status': privacy_status
-            }
-        else:
+
+        # Resumable upload loop with network error retry
+        response = None
+        retry = 0
+        max_retries = 10
+
+        # Network errors worth retrying (not file/permission errors)
+        _RETRYABLE = (ConnectionResetError, ConnectionAbortedError, ConnectionError, socket.error)
+
+        while response is None:
+            try:
+                _, response = insert_request.next_chunk()
+            except HttpError as e:
+                if e.resp.status in [500, 502, 503, 504]:
+                    retry += 1
+                    if retry > max_retries:
+                        raise
+                    wait = min(2 ** retry, 60)
+                    self._log_upload(f"⚠️ Server error {e.resp.status}, retry {retry}/{max_retries} sau {wait}s...")
+                    _time.sleep(wait)
+                elif e.resp.status == 401:
+                    # Token expired — refresh and rebuild service
+                    self.credentials.refresh(Request())
+                    self.service = build('youtube', 'v3', credentials=self.credentials)
+                    retry += 1
+                    if retry > max_retries:
+                        raise
+                    self._log_upload(f"⚠️ Token hết hạn, đã refresh, retry {retry}/{max_retries}...")
+                else:
+                    raise
+            except _RETRYABLE as e:
+                retry += 1
+                if retry > max_retries:
+                    raise
+                wait = min(2 ** retry, 60)
+                self._log_upload(f"⚠️ Lỗi mạng ({type(e).__name__}), retry {retry}/{max_retries} sau {wait}s...")
+                _time.sleep(wait)
+
+        if not response:
             return {
                 'success': False,
                 'error': 'Upload failed - no response from YouTube'
             }
+
+        video_id = response['id']
+        result = {
+            'success': True,
+            'video_id': video_id,
+            'title': title,
+            'url': f'https://youtube.com/watch?v={video_id}',
+            'upload_status': 'uploaded',
+            'processing_status': 'processing',
+            'privacy_status': privacy_status
+        }
+
+        # Share private video with specific emails via YouTube Studio internal API
+        if privacy_status == 'private' and private_share_emails and private_share_emails.strip():
+            try:
+                share_result = self._share_private_video(video_id, private_share_emails.strip())
+                result['private_share'] = share_result
+            except Exception as share_err:
+                result['private_share'] = {'success': False, 'error': str(share_err)}
+
+        return result
+
+    def _share_private_video(self, video_id, emails_str):
+        """Share a private video with specific email addresses using YouTube Studio API."""
+        import requests as _requests
+
+        emails_clean = ', '.join(e.strip() for e in emails_str.split(',') if e.strip())
+        if not emails_clean:
+            return {'success': False, 'error': 'No valid emails provided'}
+
+        token = self.credentials.token
+        headers = {
+            'Authorization': f'Bearer {token}',
+            'Content-Type': 'application/json',
+            'Origin': 'https://studio.youtube.com',
+            'X-Origin': 'https://studio.youtube.com',
+            'x-origin': 'https://studio.youtube.com',
+            'x-goog-authuser': '0',
+            'x-youtube-client-name': '62',
+            'x-youtube-client-version': '1.20260528.00.00',
+        }
+
+        payload = {
+            'encryptedVideoId': video_id,
+            'flowType': 'MDE_FLOW_TYPE_UPLOAD',
+            'privacyState': {'newPrivacy': 'PRIVATE'},
+            'privateShare': {
+                'notifyViaEmail': True,
+                'shareEmails': emails_clean
+            },
+            'draftState': {
+                'operation': 'MDE_DRAFT_STATE_UPDATE_OPERATION_REMOVE_DRAFT_STATE'
+            },
+            'videoReadMask': {'privateShare': {'all': True}},
+            'context': {
+                'client': {
+                    'clientName': 62,
+                    'clientVersion': '1.20260528.00.00',
+                    'hl': 'en',
+                    'gl': 'VN',
+                    'utcOffsetMinutes': 420,
+                    'userInterfaceTheme': 'USER_INTERFACE_THEME_DARK',
+                }
+            }
+        }
+
+        resp = _requests.post(
+            'https://studio.youtube.com/youtubei/v1/video_manager/metadata_update?alt=json',
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+
+        if resp.status_code == 200:
+            email_list = [e.strip() for e in emails_str.split(',') if e.strip()]
+            return {'success': True, 'shared_with': email_list}
+        else:
+            return {'success': False, 'error': f'HTTP {resp.status_code}: {resp.text[:300]}'}
     
     def _prepare_tags(self, tags):
         """Prepare tags for upload"""
@@ -545,11 +668,10 @@ class YouTubeAPI:
         else:
             return []
             
-    def upload_optimized_video(self, video_file, title, description, tags, category="22", privacy_status="public", optimize_quality=True, quality_preset="high"):
+    def upload_optimized_video(self, video_file, title, description, tags, category="22", privacy_status="public", optimize_quality=True, quality_preset="high", private_share_emails="", made_for_kids=False):
         """Upload optimized video to YouTube"""
         try:
-            # For now, use the same upload method but with optimization notes
-            result = self.upload_video(video_file, title, description, tags, category, privacy_status)
+            result = self.upload_video(video_file, title, description, tags, category, privacy_status, private_share_emails, made_for_kids)
             
             if result['success']:
                 # Add optimization info to result
@@ -708,7 +830,7 @@ class YouTubeAPI:
                 'error': str(e)
             }
             
-    def upload_shorts_video(self, video_file, title, description, tags, privacy_status="public"):
+    def upload_shorts_video(self, video_file, title, description, tags, privacy_status="public", private_share_emails="", made_for_kids=False):
         """Upload video optimized for YouTube Shorts"""
         try:
             # Handle tags - convert to string if it's a list
@@ -716,21 +838,18 @@ class YouTubeAPI:
                 tags_str = ', '.join(tags)
             else:
                 tags_str = str(tags) if tags else ""
-            
+
             # Add #Shorts hashtag if not present
             shorts_tags = tags_str
             if '#shorts' not in tags_str.lower() and '#short' not in tags_str.lower():
                 shorts_tags = f"{tags_str}, #Shorts" if tags_str else "#Shorts"
-            
+
             # Enhanced description for Shorts
             shorts_description = f"{description}\n\n#Shorts #YouTubeShorts #Viral"
-            
-            # Add vertical video optimization note
             if "vertical" not in shorts_description.lower():
                 shorts_description += "\n\n📱 Optimized for mobile viewing"
-            
-            # Use the main upload method with Shorts optimization
-            result = self.upload_video(video_file, title, shorts_description, shorts_tags, "22", privacy_status)
+
+            result = self.upload_video(video_file, title, shorts_description, shorts_tags, "22", privacy_status, private_share_emails, made_for_kids)
             
             if result['success']:
                 # Update URL to Shorts format if real upload
@@ -758,6 +877,7 @@ DEFAULT_UPLOAD_SETTINGS = {
     'description': "🎬 Amazing content from Douyin!\n\nFollow for more amazing videos!\nLike and Subscribe if you enjoyed!\n\n#Douyin #Viral #Entertainment #Shorts",
     'tags': 'douyin,viral,entertainment,funny,trending,shorts',
     'privacy': 'public',
+    'private_share_emails': '',
     'made_for_kids': 'no',
     'age_restriction': 'none',
     'category': 'Entertainment', 
@@ -780,10 +900,15 @@ DEFAULT_UPLOAD_SETTINGS = {
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 YT_OUTPUT_DIR = os.path.join(_THIS_DIR, "output", "YouTube")
 YT_HISTORY_FILE = os.path.join(_THIS_DIR, "yt_history.txt")
+BROWSER_DETECTOR_PORT = 8765
+BROWSER_OUTPUT_DIR = os.path.join(_THIS_DIR, "output", "BrowserDetector")
+BROWSER_EXTENSION_DIR = os.path.join(_THIS_DIR, "browser_extension")
 
 # Auto-detect ffmpeg bundled in project
 _FFMPEG_CANDIDATE = os.path.join(_THIS_DIR, "ffmpeg", "bin", "ffmpeg.exe")
 FFMPEG_DIR = os.path.join(_THIS_DIR, "ffmpeg", "bin") if os.path.exists(_FFMPEG_CANDIDATE) else None
+_FFPROBE_CANDIDATE = os.path.join(_THIS_DIR, "ffmpeg", "bin", "ffprobe.exe")
+FFPROBE_PATH = _FFPROBE_CANDIDATE if os.path.exists(_FFPROBE_CANDIDATE) else None
 
 # Auto-detect Node.js for YouTube n-challenge solver
 def _find_node():
@@ -807,6 +932,8 @@ class DouyinYouTubeTool:
         self._init_youtube()
         self._init_ui()
         self._init_theme()
+        self._start_browser_detector_server()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         
     def _init_window(self):
         """Initialize main window"""
@@ -839,6 +966,23 @@ class DouyinYouTubeTool:
         self.yt_progress_data = {}          # filled by progress hook
         self.yt_output_dir = YT_OUTPUT_DIR
         self.yt_cookies_file = ""
+
+        # Browser extension detector state
+        self.browser_detector_port = BROWSER_DETECTOR_PORT
+        self.browser_detector_token = secrets.token_urlsafe(18)
+        self.browser_detector_server = None
+        self.browser_detector_thread = None
+        self.browser_candidates = []
+        self.browser_candidates_by_id = {}
+        self.browser_candidate_seen = {}
+        self.browser_candidates_lock = threading.Lock()
+        self.browser_output_dir = BROWSER_OUTPUT_DIR
+        self.browser_is_downloading = False
+        self.bd_batch_jobs = []
+        self.bd_batch_jobs_by_id = {}
+        self.bd_batch_lock = threading.Lock()
+        self.bd_batch_running = False
+        self.bd_batch_download_lock = threading.Lock()
         
     def _init_youtube(self):
         """Initialize YouTube uploader"""
@@ -871,8 +1015,10 @@ class DouyinYouTubeTool:
         if not YOUTUBE_AVAILABLE:
             self.log("❌ YouTube API not available")
             return None
-            
+
         try:
+            # Route upload progress messages to the app log
+            youtube_api._log_upload = self.log
             return youtube_api
         except Exception as e:
             self.log(f"❌ Failed to initialize YouTube API: {e}")
@@ -1014,11 +1160,13 @@ class DouyinYouTubeTool:
         # Create tab contents
         self.create_download_tab()
         self.create_yt_download_tab()
+        self.create_browser_detector_tab()
         self.create_upload_tab()
 
         # Add tabs to notebook
         self.content_container.add(self.download_frame, text="📥 Douyin Downloader")
         self.content_container.add(self.yt_download_frame, text="🎬 YouTube Downloader")
+        self.content_container.add(self.browser_detector_frame, text="Browser Detector")
         self.content_container.add(self.upload_frame, text="📤 YouTube Uploader")
         self.content_container.enable_traversal()
         self.content_container.bind("<<NotebookTabChanged>>", self.on_tab_changed)
@@ -1046,6 +1194,11 @@ class DouyinYouTubeTool:
     def setup_styles(self):
         """Setup beautiful color themes and styles"""
         style = ttk.Style()
+        try:
+            if 'clam' in style.theme_names():
+                style.theme_use('clam')
+        except tk.TclError:
+            pass
         
         # Configure color scheme
         self.colors = {
@@ -1061,33 +1214,38 @@ class DouyinYouTubeTool:
             'background': '#FFFFFF',   # Pure white background
             'surface': '#F1F3F4',      # Slightly darker surface
             'medium': '#6C757D',       # Medium gray
-            'dark': '#343A40'          # Dark gray
+            'dark': '#343A40',         # Dark gray
+            'tab_bg': '#DCEBFA',       # Visible inactive tab background
+            'tab_active': '#BFE1FF',   # Hovered tab background
+            'tab_selected': '#2F80ED', # Selected tab background
+            'tab_text': '#1F2937'      # High-contrast tab text
         }
         
         # Configure notebook style with better spacing and visibility
         style.configure('TNotebook', 
-                       background=self.colors['surface'],
+                       background=self.colors['tab_bg'],
                        borderwidth=1,
                        relief='solid',
                        tabmargins=[2, 5, 2, 0])  # Better spacing between tabs
         
         style.configure('TNotebook.Tab', 
                        padding=[20, 10],  # More padding for better spacing
-                       background=self.colors['medium'],
-                       foreground=self.colors['dark'],
+                       background=self.colors['tab_bg'],
+                       foreground=self.colors['tab_text'],
                        focuscolor='none',
                        borderwidth=1,
-                       relief='solid',
+                       relief='raised',
                        font=('Segoe UI', 10, 'bold'))  # Larger, bolder font
         
         style.map('TNotebook.Tab',
-                 background=[('selected', self.colors['primary']),
-                           ('active', self.colors['secondary']),
-                           ('!selected', self.colors['medium'])],
+                 background=[('selected', self.colors['tab_selected']),
+                           ('active', self.colors['tab_active']),
+                           ('!selected', self.colors['tab_bg'])],
                  foreground=[('selected', 'white'),
-                           ('active', self.colors['dark']),
-                           ('!selected', 'white')],
-                 borderwidth=[('selected', 1), ('!selected', 1)])
+                           ('active', self.colors['tab_text']),
+                           ('!selected', self.colors['tab_text'])],
+                 borderwidth=[('selected', 1), ('!selected', 1)],
+                 relief=[('selected', 'sunken'), ('!selected', 'raised')])
         
         # Configure LabelFrame styles for better contrast
         style.configure('TLabelFrame', 
@@ -1603,6 +1761,10 @@ class DouyinYouTubeTool:
             info_parts.append("✅ FFmpeg: có")
         else:
             info_parts.append("⚠️ FFmpeg: không tìm thấy (video có thể là .webm)")
+        if FFPROBE_PATH:
+            info_parts.append("✅ FFprobe: có")
+        else:
+            info_parts.append("⚠️ FFprobe: thiếu (metadata warning)")
         if NODE_PATH:
             info_parts.append("✅ Node.js: có (n-challenge solver)")
         else:
@@ -1706,8 +1868,32 @@ class DouyinYouTubeTool:
             title="Chọn cookies.txt",
             filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
         )
-        if path:
-            self.yt_cookies_var.set(path)
+        if not path:
+            return
+        # Validate: check for essential auth cookies
+        auth_keys = {"SAPISID", "SID", "__Secure-3PAPISID", "LOGIN_INFO", "HSID", "SSID"}
+        found_keys = set()
+        try:
+            with open(path, encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    if line.startswith("#") or not line.strip():
+                        continue
+                    parts = line.strip().split("\t")
+                    if len(parts) >= 6:
+                        found_keys.add(parts[5])
+        except Exception:
+            pass
+        missing = auth_keys - found_keys
+        if missing:
+            messagebox.showwarning(
+                "Cookie thiếu xác thực",
+                f"File cookie này thiếu các cookie đăng nhập quan trọng:\n"
+                f"  {', '.join(sorted(missing))}\n\n"
+                f"YouTube sẽ không nhận ra bạn đã đăng nhập → video private sẽ không tải được.\n\n"
+                f"Hãy export lại bằng extension 'Get cookies.txt LOCALLY' khi đang đăng nhập YouTube.\n\n"
+                f"Vẫn dùng file này?"
+            )
+        self.yt_cookies_var.set(path)
 
     # ── Cookie extraction helpers ─────────────────────────────────────────────
 
@@ -1838,21 +2024,21 @@ class DouyinYouTubeTool:
             return ""
 
     def _extract_chrome_cookies_direct(self, browser: str) -> list[dict]:
-        """Read Chrome/Edge cookies directly via SQLite immutable=1 (works while browser is open).
+        """Read Chrome/Edge cookies by copying the DB to a temp file first (avoids lock).
         Returns list of dicts with keys: domain, path, secure, expires, name, value.
         """
-        import sqlite3, json, base64
+        import sqlite3, json, base64, tempfile, shutil as _shutil
 
         # Locate profile dirs for known Chromium browsers
         local = os.environ.get("LOCALAPPDATA", "")
         roaming = os.environ.get("APPDATA", "")
         profile_dirs = {
-            "chrome":   os.path.join(local,   "Google",    "Chrome",   "User Data"),
-            "edge":     os.path.join(local,   "Microsoft", "Edge",     "User Data"),
-            "chromium": os.path.join(local,   "Chromium",  "User Data"),
+            "chrome":   os.path.join(local,   "Google",        "Chrome",        "User Data"),
+            "edge":     os.path.join(local,   "Microsoft",     "Edge",          "User Data"),
+            "chromium": os.path.join(local,   "Chromium",      "User Data"),
             "brave":    os.path.join(local,   "BraveSoftware", "Brave-Browser", "User Data"),
-            "opera":    os.path.join(roaming, "Opera Software", "Opera Stable"),
-            "vivaldi":  os.path.join(local,   "Vivaldi",   "User Data"),
+            "opera":    os.path.join(roaming, "Opera Software","Opera Stable"),
+            "vivaldi":  os.path.join(local,   "Vivaldi",       "User Data"),
         }
 
         user_data = profile_dirs.get(browser.lower())
@@ -1876,15 +2062,46 @@ class DouyinYouTubeTool:
         if not db_path:
             raise FileNotFoundError(f"Cookies database not found for {browser}")
 
-        # Open with immutable=1 — works even while browser is running
-        conn = sqlite3.connect(f"file:{db_path}?immutable=1", uri=True)
-        conn.row_factory = sqlite3.Row
-        yt_domains = (".youtube.com", ".youtu.be", "youtube.com", "accounts.google.com")
-        rows = conn.execute(
+        # Read the locked SQLite file directly using Python's open() with share flags
+        # via ctypes — then feed raw bytes to sqlite3 via :memory:
+        import ctypes, ctypes.wintypes, tempfile, sqlite3 as _sqlite3
+
+        def _read_locked_file(path: str) -> bytes:
+            """Read a Windows-locked file by opening with full FILE_SHARE_* flags."""
+            k32 = ctypes.windll.kernel32
+            h = k32.CreateFileW(
+                path,
+                0x80000000,          # GENERIC_READ
+                0x1 | 0x2 | 0x4,     # FILE_SHARE_READ | WRITE | DELETE
+                None,
+                3,                   # OPEN_EXISTING
+                0x80,                # FILE_ATTRIBUTE_NORMAL
+                None
+            )
+            if h == ctypes.wintypes.HANDLE(-1).value:
+                raise OSError(f"Cannot open file (error {k32.GetLastError()}): {path}")
+            try:
+                hi = ctypes.wintypes.DWORD(0)
+                lo = k32.GetFileSize(h, ctypes.byref(hi))
+                size = (hi.value << 32) | (lo & 0xFFFFFFFF)
+                buf  = ctypes.create_string_buffer(size)
+                read = ctypes.wintypes.DWORD(0)
+                if not k32.ReadFile(h, buf, size, ctypes.byref(read), None):
+                    raise OSError(f"ReadFile failed (error {k32.GetLastError()})")
+                return buf.raw[:read.value]
+            finally:
+                k32.CloseHandle(h)
+
+        raw = _read_locked_file(db_path)
+        # Load into in-memory SQLite — no temp file needed
+        mem_conn = _sqlite3.connect(":memory:")
+        mem_conn.deserialize(raw)
+        mem_conn.row_factory = _sqlite3.Row
+        rows = mem_conn.execute(
             "SELECT host_key, path, is_secure, expires_utc, name, encrypted_value "
             "FROM cookies WHERE host_key LIKE '%youtube%' OR host_key LIKE '%google%'"
         ).fetchall()
-        conn.close()
+        mem_conn.close()
 
         cookies = []
         for row in rows:
@@ -1980,174 +2197,83 @@ class DouyinYouTubeTool:
                        capture_output=True)
 
     def _yt_auto_cookie_from_browser(self):
-        """Open Chrome with real profile (already logged in) → extract cookies via CDP."""
-        chrome_exe, user_data_dir = self._get_real_chrome_user_data()
-        if not chrome_exe:
-            messagebox.showerror(
-                "Không tìm thấy Chrome/Edge",
-                "Không tìm thấy Chrome hoặc Edge trên máy.\n"
-                "Hãy dùng nút Browse để chọn file cookies.txt thủ công."
+        """Show guide to export cookies manually — Chrome v127+ App-Bound Encryption blocks all automated extraction."""
+        import webbrowser as _wb
+
+        win = tk.Toplevel(self.root)
+        win.title("🍪 Hướng dẫn lấy Cookie YouTube")
+        win.resizable(False, False)
+        win.grab_set()
+
+        try:
+            win.iconbitmap(self.root.iconbitmap())
+        except Exception:
+            pass
+
+        pad = dict(padx=18, pady=8)
+
+        tk.Label(win, text="Chrome v127+ không cho phép đọc cookies tự động",
+                 font=("Segoe UI", 11, "bold"), fg="#c0392b").pack(**pad)
+
+        msg = (
+            "Chrome mới mã hóa cookies bằng App-Bound Encryption —\n"
+            "không có công cụ bên ngoài nào đọc được (kể cả yt-dlp).\n\n"
+            "⚠️  Để tải video private, file cookie PHẢI chứa cookie đăng nhập\n"
+            "(SAPISID, SID, HSID...) — chỉ có khi export đúng cách khi đang đăng nhập."
+        )
+        tk.Label(win, text=msg, font=("Segoe UI", 10), justify=tk.LEFT).pack(**pad)
+
+        sep = ttk.Separator(win, orient="horizontal")
+        sep.pack(fill=tk.X, padx=18, pady=4)
+
+        tk.Label(win, text="Các bước thực hiện:", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=18)
+        steps = (
+            "1. Mở Chrome → vào youtube.com và ĐĂNG NHẬP tài khoản có quyền xem",
+            "2. Cài extension 'Get cookies.txt LOCALLY' (nút bên dưới)",
+            "3. Đang ở trang youtube.com → click icon extension → chọn 'Export'",
+            "4. Lưu file cookies.txt (phải xuất từ youtube.com, không phải trang khác)",
+            "5. Nhấn 'Chọn file cookies.txt' bên dưới để nạp vào app",
+        )
+        for s in steps:
+            tk.Label(win, text=s, font=("Segoe UI", 10), justify=tk.LEFT).pack(anchor="w", padx=28)
+
+        sep2 = ttk.Separator(win, orient="horizontal")
+        sep2.pack(fill=tk.X, padx=18, pady=8)
+
+        btn_frame = tk.Frame(win)
+        btn_frame.pack(pady=(0, 14))
+
+        tk.Button(
+            btn_frame, text="🌐 Mở Chrome Web Store (cài extension)",
+            font=("Segoe UI", 10), bg="#4285f4", fg="white", relief=tk.FLAT,
+            padx=10, pady=6,
+            command=lambda: _wb.open(
+                "https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc")
+        ).pack(side=tk.LEFT, padx=6)
+
+        def _browse_and_close():
+            path = filedialog.askopenfilename(
+                title="Chọn file cookies.txt",
+                filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
             )
-            return
+            if path:
+                self.yt_cookies_var.set(path)
+                self._yt_set_status("✅ Đã chọn file cookies", self.colors['secondary'])
+                win.destroy()
 
-        browser_name = "Chrome" if "chrome" in chrome_exe.lower() else "Edge"
-        cookie_path  = os.path.join(_THIS_DIR, "yt_cookies_auto.txt")
-        CDP_PORT     = 9229
+        tk.Button(
+            btn_frame, text="📂 Chọn file cookies.txt",
+            font=("Segoe UI", 10), bg="#27ae60", fg="white", relief=tk.FLAT,
+            padx=10, pady=6,
+            command=_browse_and_close
+        ).pack(side=tk.LEFT, padx=6)
 
-        # ── Detect if browser is currently running ──────────────────────────
-        running_pids = self._chrome_is_running()
-        need_close   = bool(running_pids)
-
-        if need_close:
-            choice = messagebox.askyesno(
-                f"{browser_name} đang mở",
-                f"{browser_name} đang chạy ({len(running_pids)} process).\n\n"
-                f"App cần đóng {browser_name} tạm thời để mở với profile đã đăng nhập.\n"
-                f"Sau khi lấy xong cookies, bạn có thể mở lại {browser_name} bình thường.\n\n"
-                f"⚠️  Hãy lưu công việc đang làm trong {browser_name} trước!\n\n"
-                f"Đóng {browser_name} ngay bây giờ?"
-            )
-            if not choice:
-                return
-        else:
-            proceed = messagebox.askyesno(
-                "Lấy Cookie YouTube",
-                f"App sẽ mở {browser_name} với profile hiện tại của bạn.\n\n"
-                f"Vì bạn đã đăng nhập YouTube trong {browser_name}, "
-                f"app sẽ lấy cookies ngay mà không cần đăng nhập lại.\n\n"
-                f"Tiếp tục?"
-            )
-            if not proceed:
-                return
-
-        def _do_cdp():
-            import subprocess, time, urllib.request
-
-            # Close Chrome if running
-            if need_close:
-                self._yt_set_status(f"🔄 Đang đóng {browser_name}…", self.colors['accent'])
-                self._kill_chrome()
-                time.sleep(2)   # wait for processes to exit
-
-            # Launch Chrome with REAL user data dir + debug port
-            self._yt_set_status(f"🌐 Đang mở {browser_name} với profile của bạn…",
-                                 self.colors['primary'])
-            cmd = [
-                chrome_exe,
-                f"--remote-debugging-port={CDP_PORT}",
-                "--no-first-run",
-                "--no-default-browser-check",
-                f"--user-data-dir={user_data_dir}",
-                "--profile-directory=Default",
-                "https://www.youtube.com",
-            ]
-            proc = subprocess.Popen(cmd)
-
-            # Wait for Chrome to start (max 15s)
-            started = False
-            for _ in range(30):
-                time.sleep(0.5)
-                try:
-                    urllib.request.urlopen(
-                        f"http://localhost:{CDP_PORT}/json/version", timeout=1)
-                    started = True
-                    break
-                except Exception:
-                    pass
-
-            if not started:
-                proc.terminate()
-                self.root.after(0, lambda: messagebox.showerror(
-                    "Lỗi", f"Không khởi động được {browser_name}. Thử lại."))
-                return
-
-            # Show "ready" dialog — use threading.Event to properly sync
-            self._yt_set_status("⏳ Chrome đã mở — hãy xác nhận trong hộp thoại…",
-                                 self.colors['accent'])
-            event  = threading.Event()
-            result = {"val": False}
-
-            def _ask():
-                # Bring app window to foreground so dialog is visible
-                try:
-                    self.root.lift()
-                    self.root.focus_force()
-                    self.root.attributes("-topmost", True)
-                    self.root.after(200, lambda: self.root.attributes("-topmost", False))
-                except Exception:
-                    pass
-                result["val"] = messagebox.askyesno(
-                    "Xác nhận lấy Cookie",
-                    f"{browser_name} đã mở YouTube với profile của bạn.\n\n"
-                    f"• Đã đăng nhập YouTube rồi → nhấn YES để lấy cookies ngay\n"
-                    f"• Chưa đăng nhập → đăng nhập trong cửa sổ Chrome đó,\n"
-                    f"  rồi quay lại đây nhấn YES\n\n"
-                    f"• Nhấn NO để huỷ"
-                )
-                event.set()   # unblock the background thread
-
-            self.root.after(2000, _ask)  # 2s delay — wait for Chrome to fully open
-            event.wait(timeout=300)      # block background thread, max 5 min
-
-            if not result["val"]:
-                proc.terminate()
-                self._yt_set_status("❌ Huỷ lấy cookie", self.colors['danger'])
-                return
-
-            # ── Extract cookies via CDP ──────────────────────────────────────
-            try:
-                self._yt_set_status("🍪 Đang lấy cookies…", self.colors['primary'])
-                raw_cookies = self._cdp_get_cookies(CDP_PORT, timeout=10)
-
-                yt_cookies = [
-                    c for c in raw_cookies
-                    if "youtube" in c.get("domain", "")
-                    or "google" in c.get("domain", "")
-                ]
-
-                if not yt_cookies:
-                    raise ValueError(
-                        "Không tìm thấy cookie YouTube.\n"
-                        "Hãy đảm bảo bạn đã đăng nhập YouTube trong cửa sổ Chrome vừa mở."
-                    )
-
-                # Write Netscape format
-                lines = ["# Netscape HTTP Cookie File\n"]
-                for c in yt_cookies:
-                    domain = c.get("domain", "")
-                    flag   = "TRUE" if domain.startswith(".") else "FALSE"
-                    secure = "TRUE" if c.get("secure") else "FALSE"
-                    exp    = max(0, int(c.get("expires", 0)))
-                    lines.append(
-                        f"{domain}\t{flag}\t{c.get('path','/')}\t"
-                        f"{secure}\t{exp}\t{c.get('name','')}\t{c.get('value','')}\n"
-                    )
-                with open(cookie_path, "w", encoding="utf-8") as f:
-                    f.writelines(lines)
-                count = len(lines) - 1
-
-                self.root.after(0, lambda n=count: [
-                    self.yt_cookies_var.set(cookie_path),
-                    self._yt_set_status(
-                        f"✅ Đã lấy {n} cookies YouTube từ {browser_name}",
-                        self.colors['secondary']),
-                    messagebox.showinfo(
-                        "Cookie OK",
-                        f"✅ Lấy thành công {n} cookies từ {browser_name}!\n\n"
-                        f"File: {cookie_path}\n\n"
-                        f"Thử tải lại video nhé!"
-                    )
-                ])
-
-            except Exception as e:
-                self.root.after(0, lambda err=str(e): [
-                    self._yt_set_status("❌ Lỗi lấy cookie", self.colors['danger']),
-                    messagebox.showerror("Lỗi Cookie", f"Không lấy được cookie:\n{err}")
-                ])
-            finally:
-                proc.terminate()
-
-        threading.Thread(target=_do_cdp, daemon=True).start()
+        tk.Button(
+            btn_frame, text="Đóng",
+            font=("Segoe UI", 10), relief=tk.FLAT,
+            padx=10, pady=6,
+            command=win.destroy
+        ).pack(side=tk.LEFT, padx=6)
 
     def _yt_view_history(self):
         if not os.path.exists(YT_HISTORY_FILE):
@@ -2422,20 +2548,11 @@ class DouyinYouTubeTool:
             "quiet": True,
             "no_warnings": False,
             "progress_hooks": [self._yt_progress_hook],
-            # tv_embedded: bypass bot-check for public videos AND full quality (DASH)
-            # ios: fallback with good quality support
-            # web: last resort for metadata (may need cookies)
+            # yt-dlp 2026+ default clients (tv_embedded/ios removed by YouTube)
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["tv_embedded", "ios", "web"],
+                    "player_client": ["android_vr", "web_safari"],
                 }
-            },
-            "http_headers": {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/122.0.0.0 Safari/537.36"
-                )
             },
         }
         # FFmpeg
@@ -2443,7 +2560,7 @@ class DouyinYouTubeTool:
             opts["ffmpeg_location"] = FFMPEG_DIR
             opts["merge_output_format"] = "mp4"
             opts["postprocessors"] = [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}]
-        # Node.js (n-challenge solver)
+        # Node.js for n-signature solving (yt-dlp 2026+ requires JS runtime)
         if NODE_PATH:
             opts["js_runtimes"] = {"node": {"path": NODE_PATH}}
         # Cookies file (manually chosen by user)
@@ -2525,28 +2642,51 @@ class DouyinYouTubeTool:
         output_dir = self.yt_output_dir_var.get().strip() or self.yt_output_dir
         q_fmt = self._yt_format_for_quality(quality, platform)
 
+        has_cookiefile = bool(
+            hasattr(self, 'yt_cookies_var') and self.yt_cookies_var.get().strip()
+            and os.path.exists(self.yt_cookies_var.get().strip())
+        )
+
         # (label, format_string, extractor_args_override, cookiesfrombrowser)
         if platform == "youtube":
-            steps = [
-                # ── No-cookie, full-quality attempts ──────────────────────
-                ("tv_embedded+ios", q_fmt,
-                 {"extractor_args": {"youtube": {"player_client": ["tv_embedded", "ios", "web"]}}},
-                 None),
-                ("ios+web", q_fmt,
-                 {"extractor_args": {"youtube": {"player_client": ["ios", "web"]}}},
-                 None),
-                ("web", q_fmt,
-                 {"extractor_args": {"youtube": {"player_client": ["web"]}}},
-                 None),
-                ("tv_embedded/best", "bestvideo+bestaudio/best",
-                 {"extractor_args": {"youtube": {"player_client": ["tv_embedded"]}}},
-                 None),
-                # ── Cookie-based fallbacks ─────────────────────────────────
-                ("chrome+cookies",   q_fmt, {}, "chrome"),
-                ("edge+cookies",     q_fmt, {}, "edge"),
-                ("firefox+cookies",  q_fmt, {}, "firefox"),
-                ("chromium+cookies", q_fmt, {}, "chromium"),
-            ]
+            if has_cookiefile:
+                # Cookie file present → try authed clients first (web_safari supports cookies)
+                steps = [
+                    ("web_safari+cookie", q_fmt,
+                     {"extractor_args": {"youtube": {"player_client": ["web_safari"]}}},
+                     None),
+                    ("tv_downgraded+cookie", q_fmt,
+                     {"extractor_args": {"youtube": {"player_client": ["tv_downgraded", "web_safari"]}}},
+                     None),
+                    # Fallback no-cookie
+                    ("android_vr+web_safari", q_fmt,
+                     {"extractor_args": {"youtube": {"player_client": ["android_vr", "web_safari"]}}},
+                     None),
+                    ("android_vr", q_fmt,
+                     {"extractor_args": {"youtube": {"player_client": ["android_vr"]}}},
+                     None),
+                ]
+            else:
+                # No cookie → try no-auth clients, then browser cookie fallbacks
+                steps = [
+                    ("android_vr+web_safari", q_fmt,
+                     {"extractor_args": {"youtube": {"player_client": ["android_vr", "web_safari"]}}},
+                     None),
+                    ("android_vr", q_fmt,
+                     {"extractor_args": {"youtube": {"player_client": ["android_vr"]}}},
+                     None),
+                    ("web_safari", q_fmt,
+                     {"extractor_args": {"youtube": {"player_client": ["web_safari"]}}},
+                     None),
+                    ("tv_downgraded", q_fmt,
+                     {"extractor_args": {"youtube": {"player_client": ["tv_downgraded", "web_safari"]}}},
+                     None),
+                    # ── Browser cookie fallbacks ───────────────────────────
+                    ("chrome+cookies",   q_fmt, {}, "chrome"),
+                    ("edge+cookies",     q_fmt, {}, "edge"),
+                    ("firefox+cookies",  q_fmt, {}, "firefox"),
+                    ("chromium+cookies", q_fmt, {}, "chromium"),
+                ]
         else:
             steps = [
                 ("default", q_fmt, {}, None),
@@ -2571,22 +2711,302 @@ class DouyinYouTubeTool:
             except Exception as e:
                 last_err = e
                 err_str = str(e)
-                bot_err = any(k in err_str.lower() for k in
-                              ("sign in", "bot", "confirm", "cookie", "403",
-                               "login", "private", "unavailable", "blocked"))
+                err_lower = err_str.lower()
                 print(f"[yt-dlp] attempt {attempt}/{total} ({label}) failed: {err_str[:150]}")
+
+                # Video private/members-only — no cookie will help, stop immediately
+                if "private" in err_lower or "members only" in err_lower or "join this channel" in err_lower:
+                    raise RuntimeError(
+                        f"Video này ở chế độ riêng tư hoặc chỉ dành cho thành viên.\n\n"
+                        f"Tài khoản YouTube của bạn không có quyền xem video này.\n"
+                        f"Không thể tải dù có cookie."
+                    )
+
+                # Bot/auth errors — worth trying cookie fallbacks
+                bot_err = any(k in err_lower for k in
+                              ("sign in", "bot", "confirm", "cookie", "403",
+                               "login", "unavailable", "blocked"))
                 # Stop early only for non-bot errors on the first no-cookie attempts
                 if not bot_err and attempt <= 4:
                     break
                 time.sleep(1)
 
+        # Final fallback: try CocCoc CDP if available
+        if platform == "youtube":
+            try:
+                self._yt_set_status("🦊 Thử lấy stream URL qua Cốc Cốc…", self.colors['accent'])
+                title = self._yt_download_via_coccoc(url, quality, output_dir)
+                print(f"[CocCoc] success")
+                return title
+            except Exception as e:
+                print(f"[CocCoc] failed: {e}")
+                last_err = e
+
         raise RuntimeError(
-            f"Tất cả {total} lần thử đều thất bại.\n\n"
+            f"Tất cả lần thử đều thất bại.\n\n"
             f"Lỗi: {str(last_err)[:200]}\n\n"
             f"💡 Giải pháp:\n"
             f"  • Nhấn '🍪 Auto từ Browser' để tự lấy cookie\n"
             f"  • Hoặc Browse chọn file cookies.txt xuất từ Chrome"
         )
+
+    # ── CocCoc CDP fallback ───────────────────────────────────────────────────
+
+    _COCCOC_EXE = r"C:\Program Files\CocCoc\Browser\Application\browser.exe"
+    _COCCOC_USER_DATA = os.path.join(
+        os.environ.get("LOCALAPPDATA", ""), "CocCoc", "Browser", "User Data")
+    _COCCOC_CDP_PORT = 9222
+
+    @staticmethod
+    def _coccoc_is_running() -> bool:
+        r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq browser.exe", "/NH"],
+                           capture_output=True, text=True)
+        return "browser.exe" in r.stdout
+
+    @staticmethod
+    def _coccoc_kill():
+        subprocess.run(["taskkill", "/F", "/IM", "browser.exe"], capture_output=True)
+
+    def _coccoc_cdp_get_player_response(self, video_url: str) -> dict:
+        """Launch CocCoc with real profile, navigate to video, return ytInitialPlayerResponse."""
+        import socket, struct
+
+        port = self._COCCOC_CDP_PORT
+
+        # Kill existing CocCoc so we can bind debug port
+        if self._coccoc_is_running():
+            self._coccoc_kill()
+            for _ in range(10):
+                time.sleep(0.5)
+                if not self._coccoc_is_running():
+                    break
+            time.sleep(1)
+
+        if not os.path.exists(self._COCCOC_EXE):
+            raise FileNotFoundError("Không tìm thấy Cốc Cốc. Hãy cài Cốc Cốc để dùng tính năng này.")
+
+        proc = subprocess.Popen([
+            self._COCCOC_EXE,
+            f"--remote-debugging-port={port}",
+            "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={self._COCCOC_USER_DATA}",
+            "--profile-directory=Default",
+            video_url,
+        ])
+
+        # Wait for CDP
+        import urllib.request as _ur
+        for i in range(30):
+            time.sleep(1)
+            try:
+                _ur.urlopen(f"http://localhost:{port}/json/version", timeout=2)
+                break
+            except Exception:
+                pass
+        else:
+            proc.terminate()
+            raise RuntimeError("Cốc Cốc CDP không phản hồi sau 30 giây.")
+
+        # Find YouTube tab
+        time.sleep(4)
+        tabs = json.loads(_ur.urlopen(f"http://localhost:{port}/json").read())
+        yt_tab = next((t for t in tabs
+                       if t.get("type") == "page" and "youtube.com" in t.get("url", "")), None)
+        if not yt_tab:
+            proc.terminate()
+            raise RuntimeError("Không tìm thấy tab YouTube trong Cốc Cốc.")
+
+        ws_path = yt_tab["webSocketDebuggerUrl"].split(f"localhost:{port}", 1)[1]
+
+        # WebSocket connection
+        sock = socket.create_connection(("localhost", port), timeout=30)
+        key = __import__("base64").b64encode(os.urandom(16)).decode()
+        sock.send((f"GET {ws_path} HTTP/1.1\r\nHost: localhost:{port}\r\n"
+                   f"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                   f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            buf += sock.recv(4096)
+
+        _mid = [0]
+        def ws_send(method, params=None):
+            _mid[0] += 1; mid = _mid[0]
+            payload = json.dumps({"id": mid, "method": method,
+                                  "params": params or {}}).encode()
+            mask = os.urandom(4); n = len(payload)
+            masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+            hdr = b"\x81"
+            if n < 126: hdr += bytes([n | 0x80]) + mask
+            elif n < 65536: hdr += bytes([126 | 0x80]) + struct.pack(">H", n) + mask
+            else: hdr += bytes([127 | 0x80]) + struct.pack(">Q", n) + mask
+            sock.send(hdr + masked); return mid
+
+        def ws_recv_id(target, timeout=15):
+            sock.settimeout(timeout)
+            for _ in range(500):
+                try:
+                    def read(n):
+                        d = b""
+                        while len(d) < n: d += sock.recv(n - len(d))
+                        return d
+                    b0, b1 = read(2); n = b1 & 0x7f
+                    if n == 126: n = struct.unpack(">H", read(2))[0]
+                    elif n == 127: n = struct.unpack(">Q", read(8))[0]
+                    msg = json.loads(read(n).decode())
+                    if msg.get("id") == target:
+                        return msg
+                except socket.timeout:
+                    break
+            return {}
+
+        # Inject XHR/fetch interceptor before navigating to video
+        INTERCEPT_JS = """
+window.__ytCaptured = window.__ytCaptured || {};
+(function(){
+    function capture(url) {
+        if (!url || url.indexOf('videoplayback') < 0) return;
+        var itag = (url.match(/[?&]itag=([^&]+)/) || [])[1];
+        if (itag) window.__ytCaptured[itag] = url;
+    }
+    var oFetch = window.fetch;
+    window.fetch = function(input, init) {
+        capture(typeof input === 'string' ? input : (input && input.url) || '');
+        return oFetch.apply(this, arguments);
+    };
+    var oOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(m, url) {
+        capture(url); return oOpen.apply(this, arguments);
+    };
+})();
+"""
+        ws_send("Page.addScriptToEvaluateOnNewDocument", {"source": INTERCEPT_JS})
+
+        import urllib.request as _ur
+        mid = ws_send("Page.navigate", {"params": video_url})
+
+        # wait for page load
+        def _wait_load(timeout=15):
+            sock.settimeout(timeout)
+            for _ in range(300):
+                try:
+                    def read(n):
+                        d = b""
+                        while len(d) < n: d += sock.recv(n - len(d))
+                        return d
+                    b0, b1 = read(2); nn = b1 & 0x7f
+                    if nn == 126: nn = struct.unpack(">H", read(2))[0]
+                    elif nn == 127: nn = struct.unpack(">Q", read(8))[0]
+                    m = json.loads(read(nn).decode())
+                    if m.get("method") in ("Page.loadEventFired", "Page.frameStoppedLoading"):
+                        return
+                except socket.timeout:
+                    return
+
+        ws_send("Page.enable")
+        mid2 = ws_send("Page.navigate", {"url": video_url})
+        ws_recv_id(mid2, timeout=10)
+        _wait_load(timeout=15)
+        time.sleep(8)  # wait for player JS + initial buffering
+
+        mid = ws_send("Runtime.evaluate", {"expression": """
+        (function(){
+            var pr = ytInitialPlayerResponse;
+            if (!pr) return JSON.stringify({err: 'not found'});
+            var sd = pr.streamingData || {};
+            var fmts = (sd.formats||[]).concat(sd.adaptiveFormats||[]);
+            // Merge captured XHR URLs into formats
+            var cap = window.__ytCaptured || {};
+            fmts.forEach(function(f){
+                if (!f.url && cap[f.itag]) f.url = cap[f.itag];
+            });
+            return JSON.stringify({
+                status: pr.playabilityStatus && pr.playabilityStatus.status,
+                title:  pr.videoDetails && pr.videoDetails.title,
+                duration: pr.videoDetails && pr.videoDetails.lengthSeconds,
+                expiresInSeconds: sd.expiresInSeconds,
+                capturedCount: Object.keys(cap).length,
+                formats: fmts.map(function(f){ return {
+                    itag: f.itag, qualityLabel: f.qualityLabel,
+                    audioQuality: f.audioQuality, mimeType: f.mimeType,
+                    width: f.width, height: f.height,
+                    contentLength: f.contentLength, url: f.url
+                };})
+            });
+        })()
+        """, "returnByValue": True})
+
+        result = ws_recv_id(mid, timeout=15)
+        sock.close()
+
+        val = result.get("result", {}).get("result", {}).get("value", "null")
+        data = json.loads(val)
+        if "err" in data:
+            raise RuntimeError(f"Không lấy được player response: {data['err']}")
+        if data.get("status") != "OK":
+            raise RuntimeError(
+                f"Video không accessible trong Cốc Cốc: {data.get('status')} — "
+                f"{data.get('reason', '')}")
+        print(f"[CocCoc] captured {data.get('capturedCount',0)} extra URLs via XHR intercept")
+        return data
+
+    def _yt_download_via_coccoc(self, url: str, quality: str, output_dir: str) -> str:
+        """Download YouTube video using stream URLs extracted via CocCoc CDP."""
+        data = self._coccoc_cdp_get_player_response(url)
+        title = data.get("title", "video")
+        formats = data.get("formats", [])
+
+        # Pick best muxed format with direct URL (no cipher needed)
+        quality_pref = {"best": 9999, "1080p": 1080, "720p": 720,
+                        "480p": 480, "360p": 360, "worst": 0}
+        max_h = quality_pref.get(quality, 720)
+
+        muxed = [f for f in formats if f.get("url") and f.get("qualityLabel")
+                 and f.get("mimeType", "").startswith("video/mp4")]
+        adaptive_v = [f for f in formats if f.get("url") and f.get("qualityLabel")
+                      and "video" in f.get("mimeType", "")]
+        adaptive_a = [f for f in formats if f.get("url") and f.get("audioQuality")
+                      and "audio" in f.get("mimeType", "")]
+
+        safe_title = "".join(c for c in title if c not in r'\/:*?"<>|').strip()[:80]
+        out_path = os.path.join(output_dir, f"{safe_title}.mp4")
+
+        # Prefer adaptive (higher quality) if ffmpeg available
+        if FFMPEG_DIR and adaptive_v and adaptive_a:
+            def pick(lst, max_height):
+                lst = sorted(lst, key=lambda f: f.get("height") or 0, reverse=True)
+                chosen = next((f for f in lst if (f.get("height") or 0) <= max_height), lst[-1])
+                return chosen
+            vf = pick(adaptive_v, max_h)
+            af = sorted(adaptive_a, key=lambda f: int(f.get("contentLength") or 0), reverse=True)[0]
+            print(f"[CocCoc] adaptive: {vf.get('qualityLabel')} + audio → {out_path}")
+            ffmpeg = os.path.join(FFMPEG_DIR, "ffmpeg.exe")
+            cmd = [ffmpeg, "-y",
+                   "-i", vf["url"], "-i", af["url"],
+                   "-c:v", "copy", "-c:a", "aac", out_path]
+            r = subprocess.run(cmd, capture_output=True)
+            if r.returncode != 0:
+                raise RuntimeError(f"ffmpeg failed: {r.stderr.decode(errors='replace')[-200:]}")
+        elif muxed:
+            f = sorted(muxed, key=lambda f: f.get("height") or 0, reverse=True)[0]
+            actual_q = f.get("qualityLabel", "?")
+            print(f"[CocCoc] muxed: {actual_q} → {out_path}")
+            # YouTube private video với SABR chỉ cung cấp 360p muxed qua CDP
+            # Higher quality dùng native MSE streaming không interceptable
+            if actual_q != quality and quality not in ("worst", "360p"):
+                print(f"[CocCoc] NOTE: chỉ có {actual_q} (YouTube SABR không cho phép lấy URL cao hơn)")
+            import urllib.request as _ur
+
+            def _dl_progress(block_count, block_size, total_size):
+                if total_size > 0:
+                    pct = min(100, block_count * block_size * 100 / total_size)
+                    self._yt_set_progress(pct)
+
+            _ur.urlretrieve(f["url"], out_path, reporthook=_dl_progress)
+        else:
+            raise RuntimeError("Không có format nào có URL trực tiếp từ Cốc Cốc.")
+
+        self._yt_save_history(title, url)
+        return title
 
     def _yt_get_video_urls(self, url: str) -> list:
         """Extract list of video URLs (handles playlists)."""
@@ -2751,6 +3171,1119 @@ class DouyinYouTubeTool:
     #  END YouTube Downloader
     # ══════════════════════════════════════════════════════════════════════════
 
+    # -----------------------------------------------------------------------
+    # Browser extension detector
+    # -----------------------------------------------------------------------
+
+    _BD_ALLOWED_HEADERS = {
+        "accept", "accept-language", "cookie", "origin", "range", "referer",
+        "user-agent"
+    }
+
+    _BD_YOUTUBE_ITAGS = {
+        "17": ("144p", "video"), "18": ("360p", "video"), "22": ("720p", "video"),
+        "134": ("360p", "video"), "135": ("480p", "video"), "136": ("720p", "video"),
+        "137": ("1080p", "video"), "160": ("144p", "video"), "242": ("240p", "video"),
+        "243": ("360p", "video"), "244": ("480p", "video"), "247": ("720p", "video"),
+        "248": ("1080p", "video"), "264": ("1440p", "video"), "266": ("2160p", "video"),
+        "298": ("720p60", "video"), "299": ("1080p60", "video"),
+        "302": ("720p60", "video"), "303": ("1080p60", "video"),
+        "313": ("2160p", "video"), "315": ("2160p60", "video"),
+        "399": ("1080p", "video"), "400": ("1440p", "video"),
+        "401": ("2160p", "video"), "571": ("4320p", "video"),
+        "139": ("48kbps", "audio"), "140": ("128kbps", "audio"),
+        "141": ("256kbps", "audio"), "249": ("50kbps", "audio"),
+        "250": ("70kbps", "audio"), "251": ("160kbps", "audio"),
+        "599": ("30kbps", "audio"), "600": ("35kbps", "audio"),
+    }
+
+    def create_browser_detector_tab(self):
+        """Create the browser-extension detector tab."""
+        self.browser_detector_frame = ttk.Frame(self.content_container)
+        main_frame = ttk.Frame(self.browser_detector_frame, padding="15")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        setup_frame = ttk.LabelFrame(main_frame, text="Extension Bridge", padding="10")
+        setup_frame.pack(fill=tk.X, pady=(0, 10))
+
+        self.bd_receiver_url_var = tk.StringVar(
+            value=f"http://127.0.0.1:{self.browser_detector_port}/candidate")
+        self.bd_token_var = tk.StringVar(value=self.browser_detector_token)
+
+        row1 = ttk.Frame(setup_frame)
+        row1.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(row1, text="Receiver:", width=12).pack(side=tk.LEFT)
+        ttk.Entry(row1, textvariable=self.bd_receiver_url_var,
+                  font=("Consolas", 9), state="readonly").pack(
+                      side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        tk.Button(row1, text="Open Extension Folder",
+                  command=self._bd_open_extension_folder,
+                  bg=self.colors['primary'], fg='white',
+                  font=('Segoe UI', 9, 'bold'), relief='flat',
+                  padx=10, pady=5).pack(side=tk.LEFT)
+
+        row2 = ttk.Frame(setup_frame)
+        row2.pack(fill=tk.X)
+        ttk.Label(row2, text="Token:", width=12).pack(side=tk.LEFT)
+        ttk.Entry(row2, textvariable=self.bd_token_var,
+                  font=("Consolas", 9), state="readonly").pack(
+                      side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        tk.Button(row2, text="Copy Token", command=self._bd_copy_token,
+                  bg=self.colors['secondary'], fg='white',
+                  font=('Segoe UI', 9, 'bold'), relief='flat',
+                  padx=10, pady=5).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(row2, text="Open Output", command=self._bd_open_output_folder,
+                  bg=self.colors['success'], fg=self.colors['dark'],
+                  font=('Segoe UI', 9, 'bold'), relief='flat',
+                  padx=10, pady=5).pack(side=tk.LEFT)
+
+        hint = (
+            "Load browser_extension as an unpacked extension, paste this token "
+            "in the extension popup, then play the video page. DRM is not supported."
+        )
+        ttk.Label(setup_frame, text=hint, font=('Segoe UI', 8),
+                  foreground=self.colors['medium']).pack(anchor=tk.W, pady=(6, 0))
+
+        quality_row = ttk.Frame(setup_frame)
+        quality_row.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(quality_row, text="YouTube quality:", width=16).pack(side=tk.LEFT)
+        self.bd_quality_var = tk.StringVar(value="1080p")
+        for label, value in [
+            ("720p", "720p"), ("1080p", "1080p"),
+            ("1440p", "1440p"), ("4K", "4k"), ("Auto", "auto")
+        ]:
+            ttk.Radiobutton(quality_row, text=label, variable=self.bd_quality_var,
+                            value=value).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(
+            quality_row,
+            text="For YouTube, detected 360p streams are used as auth context; yt-dlp fetches the selected quality from the page URL.",
+            font=('Segoe UI', 8), foreground=self.colors['medium']).pack(side=tk.LEFT, padx=(8, 0))
+
+        batch_frame = ttk.LabelFrame(main_frame, text="Batch Open in Browser", padding="10")
+        batch_frame.pack(fill=tk.X, pady=(0, 10))
+        self.bd_batch_text = scrolledtext.ScrolledText(
+            batch_frame, height=4, font=("Consolas", 9),
+            bg=self.colors['light'], fg=self.colors['dark'])
+        self.bd_batch_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8))
+        batch_controls = ttk.Frame(batch_frame)
+        batch_controls.pack(side=tk.LEFT, fill=tk.Y)
+        tk.Button(batch_controls, text="Start Batch", command=self._bd_batch_start,
+                  bg=self.colors['success'], fg=self.colors['dark'],
+                  font=('Segoe UI', 9, 'bold'), relief='flat',
+                  padx=10, pady=5).pack(fill=tk.X, pady=(0, 6))
+        tk.Button(batch_controls, text="Stop", command=self._bd_batch_stop,
+                  bg=self.colors['danger'], fg='white',
+                  font=('Segoe UI', 9, 'bold'), relief='flat',
+                  padx=10, pady=5).pack(fill=tk.X, pady=(0, 6))
+        tk.Button(batch_controls, text="Paste", command=self._bd_batch_paste,
+                  bg=self.colors['primary'], fg='white',
+                  font=('Segoe UI', 9, 'bold'), relief='flat',
+                  padx=10, pady=5).pack(fill=tk.X)
+        self.bd_batch_status_var = tk.StringVar(value="Batch idle")
+        ttk.Label(batch_frame, textvariable=self.bd_batch_status_var,
+                  font=('Segoe UI', 8), foreground=self.colors['medium']).pack(
+                      anchor=tk.W, pady=(6, 0))
+
+        list_frame = ttk.LabelFrame(main_frame, text="Detected Media", padding="10")
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        toolbar = ttk.Frame(list_frame)
+        toolbar.pack(fill=tk.X, pady=(0, 6))
+        tk.Button(toolbar, text="Refresh", command=self._bd_refresh_tree,
+                  bg=self.colors['primary'], fg='white',
+                  font=('Segoe UI', 9, 'bold'), relief='flat',
+                  padx=10, pady=5).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(toolbar, text="Download Selected",
+                  command=self._bd_download_selected_thread,
+                  bg=self.colors['success'], fg=self.colors['dark'],
+                  font=('Segoe UI', 9, 'bold'), relief='flat',
+                  padx=10, pady=5).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(toolbar, text="Clear", command=self._bd_clear_candidates,
+                  bg=self.colors['warning'], fg=self.colors['dark'],
+                  font=('Segoe UI', 9, 'bold'), relief='flat',
+                  padx=10, pady=5).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(toolbar, text="🚀 Send Downloaded to YouTube Upload",
+                  command=self._bd_send_downloaded_to_upload,
+                  bg='#E53935', fg='white',
+                  font=('Segoe UI', 9, 'bold'), relief='flat',
+                  padx=10, pady=5).pack(side=tk.LEFT, padx=(0, 12))
+        self.bd_count_var = tk.StringVar(value="0 candidates")
+        ttk.Label(toolbar, textvariable=self.bd_count_var,
+                  font=('Segoe UI', 9, 'bold'),
+                  foreground=self.colors['primary']).pack(side=tk.LEFT)
+
+        # Columns: id(hidden), time, kind, quality, title, host, url, dl_status
+        cols = ("id", "time", "kind", "quality", "title", "host", "url", "dl_status")
+        self.bd_tree = ttk.Treeview(list_frame, columns=cols,
+                                    show="headings", height=12)
+        for col, label in [
+            ("id", "id"), ("time", "Time"), ("kind", "Type"),
+            ("quality", "Quality"), ("title", "Page"), ("host", "Host"),
+            ("url", "Media URL"), ("dl_status", "Download")
+        ]:
+            self.bd_tree.heading(col, text=label)
+        self.bd_tree.column("id", width=0, minwidth=0, stretch=False)
+        self.bd_tree.column("time", width=75, minwidth=70, stretch=False)
+        self.bd_tree.column("kind", width=90, minwidth=70, stretch=False)
+        self.bd_tree.column("quality", width=90, minwidth=70, stretch=False)
+        self.bd_tree.column("title", width=220, minwidth=120)
+        self.bd_tree.column("host", width=140, minwidth=100)
+        self.bd_tree.column("url", width=320, minwidth=200)
+        self.bd_tree.column("dl_status", width=120, minwidth=100, stretch=False, anchor=tk.CENTER)
+        self.bd_tree.tag_configure("video", background="#e8f5e9")
+        self.bd_tree.tag_configure("audio", background="#fff8e1")
+        self.bd_tree.tag_configure("manifest", background="#e3f2fd")
+        self.bd_tree.tag_configure("unknown", background=self.colors['light'])
+        self.bd_tree.tag_configure("dl_done", background="#c8e6c9")
+        self.bd_tree.tag_configure("dl_error", background="#ffcdd2")
+        self.bd_tree.tag_configure("dl_active", background="#fff9c4")
+
+        scroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL,
+                               command=self.bd_tree.yview)
+        self.bd_tree.configure(yscrollcommand=scroll.set)
+        self.bd_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.bd_tree.bind("<<TreeviewSelect>>", self._bd_on_select)
+
+        detail_frame = ttk.LabelFrame(main_frame, text="Candidate Detail", padding="10")
+        detail_frame.pack(fill=tk.X)
+        self.bd_detail_text = scrolledtext.ScrolledText(
+            detail_frame, height=5, font=("Consolas", 9),
+            bg=self.colors['light'], fg=self.colors['dark'])
+        self.bd_detail_text.pack(fill=tk.X)
+        self.bd_detail_text.config(state=tk.DISABLED)
+
+        status_frame = ttk.Frame(main_frame)
+        status_frame.pack(fill=tk.X, pady=(8, 0))
+        self.bd_progress_var = tk.DoubleVar(value=0)
+        ttk.Progressbar(status_frame, variable=self.bd_progress_var,
+                        maximum=100, mode="determinate").pack(
+                            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+        self.bd_status_var = tk.StringVar(value="Waiting for extension candidates")
+        ttk.Label(status_frame, textvariable=self.bd_status_var,
+                  font=('Segoe UI', 9),
+                  foreground=self.colors['primary']).pack(side=tk.LEFT)
+
+    def _start_browser_detector_server(self):
+        """Start local HTTP receiver for the browser extension."""
+        if self.browser_detector_server:
+            return
+        app = self
+
+        class BrowserDetectorHandler(http.server.BaseHTTPRequestHandler):
+            server_version = "BrowserDetector/0.1"
+
+            def _send_json(self, status, payload):
+                raw = json.dumps(payload).encode("utf-8")
+                try:
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.send_header("Access-Control-Allow-Headers",
+                                     "Content-Type, X-Downloader-Token")
+                    self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                    self.end_headers()
+                    self.wfile.write(raw)
+                except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                    # Browser/extension polling can be cancelled while the app is replying.
+                    pass
+
+            def do_OPTIONS(self):
+                self._send_json(200, {"ok": True})
+
+            def do_GET(self):
+                if urlparse(self.path).path == "/health":
+                    self._send_json(200, {
+                        "ok": True,
+                        "port": app.browser_detector_port,
+                        "requires_token": True,
+                    })
+                else:
+                    self._send_json(404, {"ok": False, "error": "not found"})
+
+            def do_POST(self):
+                path = urlparse(self.path).path
+                if path not in ("/candidate", "/batch/next", "/batch/fail"):
+                    self._send_json(404, {"ok": False, "error": "not found"})
+                    return
+                if self.headers.get("X-Downloader-Token", "") != app.browser_detector_token:
+                    self._send_json(403, {"ok": False, "error": "bad token"})
+                    return
+                if path == "/batch/next":
+                    self._send_json(200, app._bd_batch_next_payload())
+                    return
+
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    length = 0
+                if path == "/batch/fail":
+                    payload = {}
+                    if length > 0:
+                        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                    app._bd_batch_mark_failed(
+                        str(payload.get("id") or ""),
+                        str(payload.get("reason") or "browser timeout"))
+                    self._send_json(200, {"ok": True})
+                    return
+
+                if length <= 0 or length > 1024 * 1024:
+                    self._send_json(400, {"ok": False, "error": "bad length"})
+                    return
+                try:
+                    payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                    candidate = app._bd_receive_candidate(payload)
+                    self._send_json(200, {
+                        "ok": True,
+                        "id": candidate.get("id") if candidate else None,
+                        "duplicate": candidate is None,
+                        "close_tab": bool(candidate and candidate.get("_close_batch_tab")),
+                    })
+                except Exception as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)[:200]})
+
+            def log_message(self, fmt, *args):
+                return
+
+        last_error = None
+        for port in range(BROWSER_DETECTOR_PORT, BROWSER_DETECTOR_PORT + 10):
+            try:
+                server = http.server.ThreadingHTTPServer(
+                    ("127.0.0.1", port), BrowserDetectorHandler)
+                self.browser_detector_port = port
+                self.browser_detector_server = server
+                self.browser_detector_thread = threading.Thread(
+                    target=server.serve_forever, daemon=True)
+                self.browser_detector_thread.start()
+                if hasattr(self, "bd_receiver_url_var"):
+                    self.bd_receiver_url_var.set(
+                        f"http://127.0.0.1:{port}/candidate")
+                self._bd_set_status(f"Receiver running on 127.0.0.1:{port}")
+                return
+            except OSError as exc:
+                last_error = exc
+        self._bd_set_status(f"Receiver failed: {last_error}")
+
+    def _stop_browser_detector_server(self):
+        server = self.browser_detector_server
+        self.browser_detector_server = None
+        if server:
+            try:
+                server.shutdown()
+                server.server_close()
+            except Exception:
+                pass
+
+    def on_close(self):
+        self._stop_browser_detector_server()
+        self.root.destroy()
+
+    def _bd_set_status(self, text):
+        def _upd():
+            if hasattr(self, "bd_status_var"):
+                self.bd_status_var.set(text)
+        self.root.after(0, _upd)
+
+    def _bd_set_progress(self, pct):
+        def _upd():
+            if hasattr(self, "bd_progress_var"):
+                self.bd_progress_var.set(max(0, min(100, pct)))
+        self.root.after(0, _upd)
+
+    def _bd_open_extension_folder(self):
+        if not os.path.isdir(BROWSER_EXTENSION_DIR):
+            messagebox.showwarning(
+                "Extension not found",
+                f"Extension folder not found:\n{BROWSER_EXTENSION_DIR}")
+            return
+        os.startfile(BROWSER_EXTENSION_DIR)
+
+    def _bd_open_output_folder(self):
+        os.makedirs(self.browser_output_dir, exist_ok=True)
+        os.startfile(self.browser_output_dir)
+
+    def _bd_copy_token(self):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self.browser_detector_token)
+        self._bd_set_status("Token copied")
+
+    def _bd_batch_paste(self):
+        try:
+            text = self.root.clipboard_get()
+        except Exception:
+            messagebox.showerror("Clipboard", "Clipboard does not contain text.")
+            return
+        self.bd_batch_text.insert(tk.END, ("\n" if self.bd_batch_text.get("1.0", tk.END).strip() else "") + text)
+
+    def _bd_batch_start(self):
+        raw = self.bd_batch_text.get("1.0", tk.END).strip() if hasattr(self, "bd_batch_text") else ""
+        urls = []
+        seen = set()
+        for line in raw.splitlines():
+            url = line.strip()
+            if not url:
+                continue
+            if self._yt_is_valid_url(url) and url not in seen:
+                urls.append(url)
+                seen.add(url)
+        if not urls:
+            messagebox.showwarning("No URLs", "Paste one video URL per line before starting batch.")
+            return
+        with self.bd_batch_lock:
+            self.bd_batch_jobs = []
+            self.bd_batch_jobs_by_id = {}
+            for index, url in enumerate(urls, 1):
+                job = {
+                    "id": secrets.token_hex(8),
+                    "index": index,
+                    "url": url,
+                    "status": "queued",
+                    "message": "",
+                    "created_at": time.time(),
+                    "claimed_at": 0,
+                    "downloaded_path": "",
+                }
+                self.bd_batch_jobs.append(job)
+                self.bd_batch_jobs_by_id[job["id"]] = job
+            self.bd_batch_running = True
+        self._bd_update_batch_status()
+        self._bd_set_status("Batch started. Extension will open links one by one.")
+
+    def _bd_batch_stop(self):
+        with self.bd_batch_lock:
+            self.bd_batch_running = False
+            for job in self.bd_batch_jobs:
+                if job["status"] in ("queued", "opened"):
+                    job["status"] = "stopped"
+        self._bd_update_batch_status()
+        self._bd_set_status("Batch stopped")
+
+    def _bd_batch_next_payload(self):
+        with self.bd_batch_lock:
+            if not self.bd_batch_running:
+                return {"ok": True, "running": False, "job": None}
+            now = time.time()
+            for job in self.bd_batch_jobs:
+                if job["status"] == "opened" and now - job.get("claimed_at", 0) > 90:
+                    job["status"] = "queued"
+                    job["message"] = "retry after browser timeout"
+                if job["status"] == "queued":
+                    job["status"] = "opened"
+                    job["claimed_at"] = now
+                    self.root.after(0, self._bd_update_batch_status)
+                    return {
+                        "ok": True,
+                        "running": True,
+                        "job": {
+                            "id": job["id"],
+                            "index": job["index"],
+                            "url": job["url"],
+                        }
+                    }
+            active = any(job["status"] in ("opened", "downloading") for job in self.bd_batch_jobs)
+            if not active:
+                self.bd_batch_running = False
+            self.root.after(0, self._bd_update_batch_status)
+            return {"ok": True, "running": self.bd_batch_running, "job": None}
+
+    def _bd_batch_mark_failed(self, job_id, reason):
+        if not job_id:
+            return
+        with self.bd_batch_lock:
+            job = self.bd_batch_jobs_by_id.get(job_id)
+            if job and job["status"] not in ("done", "downloading"):
+                job["status"] = "failed"
+                job["message"] = reason[:200]
+        self.root.after(0, self._bd_update_batch_status)
+
+    def _bd_update_batch_status(self):
+        if not hasattr(self, "bd_batch_status_var"):
+            return
+        with self.bd_batch_lock:
+            total = len(self.bd_batch_jobs)
+            counts = {}
+            for job in self.bd_batch_jobs:
+                counts[job["status"]] = counts.get(job["status"], 0) + 1
+            running = self.bd_batch_running
+        if not total:
+            text = "Batch idle"
+        else:
+            parts = [f"{key}: {counts[key]}" for key in sorted(counts)]
+            text = ("Running | " if running else "Idle | ") + f"total: {total} | " + ", ".join(parts)
+        self.bd_batch_status_var.set(text)
+
+    def _bd_receive_candidate(self, payload):
+        candidate = self._bd_make_candidate(payload)
+        if not candidate:
+            return None
+        with self.browser_candidates_lock:
+            key = candidate["dedupe_key"]
+            if key in self.browser_candidate_seen:
+                return None
+            self.browser_candidate_seen[key] = time.time()
+            self.browser_candidates.append(candidate)
+            self.browser_candidates_by_id[candidate["id"]] = candidate
+        self._bd_handle_batch_candidate(candidate)
+        self.root.after(0, self._bd_insert_tree_candidate, candidate)
+        return candidate
+
+    def _bd_make_candidate(self, payload):
+        media_url = str(payload.get("media_url") or payload.get("url") or "").strip()
+        if not media_url or media_url.startswith(("blob:", "data:", "filesystem:")):
+            return None
+        parsed = urlparse(media_url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return None
+        if self._bd_is_noise_media_url(media_url):
+            return None
+        headers = payload.get("headers") or {}
+        clean_headers = {}
+        if isinstance(headers, dict):
+            for key, value in headers.items():
+                if key and str(key).lower() in self._BD_ALLOWED_HEADERS:
+                    clean_headers[str(key)] = str(value)
+        kind, quality, itag = self._bd_classify_media(media_url, payload)
+        content_type = str(payload.get("content_type") or payload.get("mime") or "")
+        cookies = self._bd_normalize_cookie_list(payload.get("cookies") or [])
+        title = str(payload.get("page_title") or payload.get("title") or "").strip()
+        page_url = str(payload.get("page_url") or payload.get("document_url") or "").strip()
+        batch_id = str(payload.get("batch_id") or "")
+        batch_url = str(payload.get("batch_url") or "")
+        if not title:
+            title = urlparse(page_url).netloc or parsed.netloc
+        dedupe_key = self._bd_dedupe_key(media_url, page_url, itag, content_type)
+        if batch_id:
+            dedupe_key = f"{batch_id}|{dedupe_key}"
+        now = datetime.now()
+        return {
+            "id": secrets.token_hex(8),
+            "created_at": now.isoformat(timespec="seconds"),
+            "display_time": now.strftime("%H:%M:%S"),
+            "media_url": media_url,
+            "page_url": page_url,
+            "page_title": title[:180],
+            "host": parsed.netloc,
+            "headers": clean_headers,
+            "method": str(payload.get("method") or "GET"),
+            "source": str(payload.get("source") or "extension"),
+            "batch_id": batch_id,
+            "batch_url": batch_url,
+            "content_type": content_type,
+            "kind": kind,
+            "quality": quality,
+            "itag": itag,
+            "dedupe_key": dedupe_key,
+            "drm": bool(payload.get("drm")),
+            "cookies": cookies,
+        }
+
+    def _bd_handle_batch_candidate(self, candidate):
+        batch_id = candidate.get("batch_id")
+        if not batch_id:
+            return
+        if candidate.get("kind") not in ("video", "manifest"):
+            return
+        with self.bd_batch_lock:
+            job = self.bd_batch_jobs_by_id.get(batch_id)
+            if not job or job["status"] in ("downloading", "done", "failed", "stopped"):
+                return
+            job["status"] = "downloading"
+            job["message"] = f"detected {candidate.get('quality', '')}"
+        candidate["_close_batch_tab"] = True
+        self.root.after(0, self._bd_update_batch_status)
+        threading.Thread(
+            target=self._bd_thread_download_batch_candidate,
+            args=(batch_id, candidate),
+            daemon=True
+        ).start()
+
+    def _bd_thread_download_batch_candidate(self, batch_id, candidate):
+        try:
+            with self.bd_batch_download_lock:
+                path = self._bd_download_candidate(candidate)
+            with self.bd_batch_lock:
+                job = self.bd_batch_jobs_by_id.get(batch_id)
+                if job:
+                    job["status"] = "done"
+                    job["downloaded_path"] = path
+                    job["message"] = os.path.basename(path)
+            self._bd_set_status(f"Batch downloaded: {os.path.basename(path)}")
+        except Exception as exc:
+            with self.bd_batch_lock:
+                job = self.bd_batch_jobs_by_id.get(batch_id)
+                if job:
+                    job["status"] = "failed"
+                    job["message"] = str(exc)[:200]
+            self._bd_set_status(f"Batch failed: {str(exc)[:100]}")
+        finally:
+            self.root.after(0, self._bd_update_batch_status)
+            self.root.after(0, self._yt_refresh_dl_list)
+
+    def _bd_normalize_cookie_list(self, cookies):
+        result = []
+        if not isinstance(cookies, list):
+            return result
+        for cookie in cookies:
+            if not isinstance(cookie, dict):
+                continue
+            name = str(cookie.get("name") or "").strip()
+            value = str(cookie.get("value") or "")
+            domain = str(cookie.get("domain") or "").strip()
+            if not name or not domain:
+                continue
+            result.append({
+                "domain": domain,
+                "path": str(cookie.get("path") or "/"),
+                "secure": bool(cookie.get("secure")),
+                "expirationDate": cookie.get("expirationDate") or 0,
+                "name": name,
+                "value": value,
+            })
+        return result
+
+    def _bd_is_noise_media_url(self, media_url):
+        parsed = urlparse(media_url)
+        host = parsed.netloc.lower()
+        path = parsed.path.lower()
+        if host.endswith("youtube.com") and path.startswith("/s/"):
+            return True
+        if path.endswith(("/failure.mp3", "/input.mp3", "/open.mp3", "/success.mp3")):
+            return True
+        return False
+
+    def _bd_classify_media(self, media_url, payload):
+        parsed = urlparse(media_url)
+        qs = parse_qs(parsed.query)
+        itag = (qs.get("itag") or [""])[0]
+        mime = (qs.get("mime") or [payload.get("content_type") or ""])[0]
+        path = parsed.path.lower()
+        host = parsed.netloc.lower()
+        if itag in self._BD_YOUTUBE_ITAGS:
+            quality, kind = self._BD_YOUTUBE_ITAGS[itag]
+            return kind, quality, itag
+        mime_lower = str(mime).lower()
+        if ".m3u8" in path or "mpegurl" in mime_lower:
+            return "manifest", "HLS", itag
+        if ".mpd" in path or "dash+xml" in mime_lower:
+            return "manifest", "DASH", itag
+        if "googlevideo.com" in host and "audio" in mime_lower:
+            return "audio", "audio", itag
+        if "googlevideo.com" in host and "video" in mime_lower:
+            return "video", "video", itag
+        if "audio" in mime_lower or path.endswith((".m4a", ".mp3", ".aac", ".opus")):
+            return "audio", "audio", itag
+        if "video" in mime_lower or path.endswith((".mp4", ".webm", ".mov", ".mkv")):
+            return "video", "direct", itag
+        return "unknown", "unknown", itag
+
+    def _bd_dedupe_key(self, media_url, page_url, itag, content_type):
+        parsed = urlparse(media_url)
+        host = parsed.netloc.lower()
+        if "googlevideo.com" in host and itag:
+            return "|".join([page_url, host, itag, content_type])
+        return media_url
+
+    def _bd_insert_tree_candidate(self, candidate):
+        if not hasattr(self, "bd_tree"):
+            return
+        tag = candidate["kind"] if candidate["kind"] in ("video", "audio", "manifest") else "unknown"
+        self.bd_tree.insert("", "end", values=(
+            candidate["id"], candidate["display_time"], candidate["kind"],
+            candidate["quality"], candidate["page_title"], candidate["host"],
+            candidate["media_url"][:220],
+            "",  # dl_status — empty until downloaded
+        ), tags=(tag,))
+        self._bd_update_count()
+        self._bd_set_status(f"Detected {candidate['kind']} {candidate['quality']}")
+
+    def _bd_find_tree_item(self, candidate_id):
+        """Return tree iid for a candidate id, or None."""
+        if not hasattr(self, "bd_tree"):
+            return None
+        for iid in self.bd_tree.get_children():
+            if self.bd_tree.item(iid, "values")[0] == candidate_id:
+                return iid
+        return None
+
+    def _bd_set_row_status(self, candidate_id, text, tag=None):
+        """Thread-safe update of dl_status column for a specific row."""
+        def _upd():
+            iid = self._bd_find_tree_item(candidate_id)
+            if not iid:
+                return
+            vals = list(self.bd_tree.item(iid, "values"))
+            while len(vals) < 8:
+                vals.append("")
+            vals[7] = text
+            existing_tags = list(self.bd_tree.item(iid, "tags"))
+            # Keep kind-based color tag, replace dl_ tag
+            kind_tags = [t for t in existing_tags if not t.startswith("dl_")]
+            new_tags = kind_tags + ([tag] if tag else [])
+            self.bd_tree.item(iid, values=vals, tags=new_tags)
+        self.root.after(0, _upd)
+
+    def _bd_refresh_tree(self):
+        if not hasattr(self, "bd_tree"):
+            return
+        for item in self.bd_tree.get_children():
+            self.bd_tree.delete(item)
+        with self.browser_candidates_lock:
+            candidates = list(self.browser_candidates)
+        for candidate in candidates:
+            self._bd_insert_tree_candidate(candidate)
+        self._bd_update_count()
+
+    def _bd_update_count(self):
+        if hasattr(self, "bd_count_var"):
+            count = len(self.bd_tree.get_children()) if hasattr(self, "bd_tree") else 0
+            self.bd_count_var.set(f"{count} candidates")
+
+    def _bd_send_downloaded_to_upload(self):
+        """Send all successfully downloaded files to the YouTube Upload tab."""
+        with self.browser_candidates_lock:
+            candidates = list(self.browser_candidates)
+
+        sent = 0
+        missing = 0
+        for c in candidates:
+            path = c.get("downloaded_path")
+            if not path:
+                continue
+            if not os.path.exists(path):
+                missing += 1
+                continue
+            self.add_video_to_upload_list(path)
+            sent += 1
+
+        if sent == 0 and missing == 0:
+            messagebox.showinfo(
+                "No Downloaded Videos",
+                "Chưa có video nào được tải thành công.\n\n"
+                "Hãy chọn các dòng trong bảng và nhấn 'Download Selected' trước."
+            )
+            return
+
+        # Switch to Upload tab
+        try:
+            for i in range(self.content_container.index("end")):
+                if "Upload" in self.content_container.tab(i, "text"):
+                    self.content_container.select(i)
+                    break
+        except Exception:
+            pass
+
+        msg = f"✅ Đã thêm {sent} video vào YouTube Upload tab."
+        if missing:
+            msg += f"\n⚠️ {missing} file không tìm thấy trên disk."
+        messagebox.showinfo("Sent to Upload", msg)
+
+    def _bd_clear_candidates(self):
+        with self.browser_candidates_lock:
+            self.browser_candidates.clear()
+            self.browser_candidates_by_id.clear()
+            self.browser_candidate_seen.clear()
+        if hasattr(self, "bd_tree"):
+            for item in self.bd_tree.get_children():
+                self.bd_tree.delete(item)
+        self._bd_update_count()
+        self._bd_set_status("Candidates cleared")
+
+    def _bd_on_select(self, event=None):
+        ids = self._bd_selected_ids()
+        if not ids:
+            return
+        candidate = self.browser_candidates_by_id.get(ids[0])
+        if not candidate or not hasattr(self, "bd_detail_text"):
+            return
+        header_names = sorted(candidate.get("headers", {}).keys())
+        detail = {
+            "id": candidate["id"],
+            "kind": candidate["kind"],
+            "quality": candidate["quality"],
+            "host": candidate["host"],
+            "page_title": candidate["page_title"],
+            "page_url": candidate["page_url"],
+            "media_url": candidate["media_url"],
+            "headers_captured": header_names,
+            "has_cookie": any(k.lower() == "cookie" for k in header_names),
+            "browser_cookies": len(candidate.get("cookies") or []),
+            "source": candidate["source"],
+            "batch_id": candidate.get("batch_id", ""),
+        }
+        self.bd_detail_text.config(state=tk.NORMAL)
+        self.bd_detail_text.delete("1.0", tk.END)
+        self.bd_detail_text.insert(tk.END, json.dumps(detail, indent=2, ensure_ascii=False))
+        self.bd_detail_text.config(state=tk.DISABLED)
+
+    def _bd_selected_ids(self):
+        if not hasattr(self, "bd_tree"):
+            return []
+        ids = []
+        for item in self.bd_tree.selection():
+            values = self.bd_tree.item(item, "values")
+            if values:
+                ids.append(values[0])
+        return ids
+
+    def _bd_download_selected_thread(self):
+        if self.browser_is_downloading:
+            messagebox.showwarning("Download running", "A browser download task is already running.")
+            return
+        ids = self._bd_selected_ids()
+        if not ids:
+            messagebox.showinfo("No selection", "Select one or more detected media rows first.")
+            return
+        threading.Thread(target=self._bd_thread_download_selected,
+                         args=(ids,), daemon=True).start()
+
+    def _bd_thread_download_selected(self, ids):
+        self.browser_is_downloading = True
+        ok, failed = [], []
+        total = len(ids)
+        try:
+            for index, cid in enumerate(ids, 1):
+                candidate = self.browser_candidates_by_id.get(cid)
+                if not candidate:
+                    continue
+                self._bd_set_progress((index - 1) * 100 / max(total, 1))
+                self._bd_set_status(f"Downloading {index}/{total}: {candidate['quality']}")
+                self._bd_set_row_status(cid, f"⬇ 0%", "dl_active")
+                # Inject per-row progress hook into candidate for this download
+                candidate["_progress_hook"] = self._bd_make_progress_hook(cid, index, total)
+                try:
+                    path = self._bd_download_candidate(candidate)
+                    ok.append(path)
+                    # Store downloaded path in candidate for later "send to upload"
+                    candidate["downloaded_path"] = path
+                    self._bd_set_row_status(cid, "✅ Done", "dl_done")
+                except Exception as exc:
+                    failed.append(f"{candidate['quality']} {candidate['host']}: {exc}")
+                    self._bd_set_row_status(cid, "❌ Failed", "dl_error")
+                finally:
+                    candidate.pop("_progress_hook", None)
+            self._bd_set_progress(100 if ok else 0)
+        finally:
+            self.browser_is_downloading = False
+            self.root.after(0, self._yt_refresh_dl_list)
+        msg = f"Downloaded: {len(ok)}\nFailed: {len(failed)}"
+        if failed:
+            msg += "\n\n" + "\n".join(failed[:5])
+        self._bd_set_status(msg.replace("\n", " | "))
+        self.root.after(0, lambda: messagebox.showinfo("Browser Download Result", msg))
+
+    def _bd_download_candidate(self, candidate):
+        if candidate.get("drm"):
+            raise RuntimeError("DRM/EME content is not supported.")
+        os.makedirs(self.browser_output_dir, exist_ok=True)
+        page_error = None
+        if self._bd_is_youtube_candidate(candidate):
+            try:
+                return self._bd_check_download_audio(
+                    self._bd_download_youtube_page(candidate), candidate)
+            except Exception as exc:
+                page_error = exc
+                self._bd_set_status(f"YouTube page download failed; falling back to detected stream: {str(exc)[:90]}")
+        if "googlevideo.com" in candidate["host"].lower() and candidate["kind"] == "video":
+            audio = self._bd_find_audio_pair(candidate)
+            if audio and FFMPEG_DIR:
+                try:
+                    self._bd_set_row_status(candidate.get("id", ""), "⬇ Merging...", "dl_active")
+                    return self._bd_check_download_audio(
+                        self._bd_download_youtube_pair(candidate, audio), candidate)
+                except Exception as exc:
+                    if page_error:
+                        raise RuntimeError(
+                            f"yt-dlp page failed: {page_error}; direct stream failed: {exc}")
+                    raise
+        try:
+            return self._bd_check_download_audio(
+                self._bd_download_with_ytdlp(candidate), candidate)
+        except Exception as exc:
+            if page_error:
+                raise RuntimeError(
+                    f"yt-dlp page failed: {page_error}; direct stream failed: {exc}")
+            raise
+
+    def _bd_is_youtube_candidate(self, candidate):
+        host = (candidate.get("host") or "").lower()
+        page_url = candidate.get("page_url") or ""
+        page_host = urlparse(page_url).netloc.lower().lstrip("www.")
+        return (
+            "googlevideo.com" in host
+            or page_host in ("youtube.com", "m.youtube.com", "music.youtube.com")
+            or "youtube.com" in page_host
+        )
+
+    def _bd_get_youtube_page_url(self, candidate):
+        for page_url in ((candidate.get("page_url") or "").strip(),
+                         (candidate.get("batch_url") or "").strip()):
+            if not page_url:
+                continue
+            parsed = urlparse(page_url)
+            host = parsed.netloc.lower().lstrip("www.")
+            if host in ("youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"):
+                if parsed.path in ("", "/") and not parsed.query:
+                    continue
+                return page_url
+        return ""
+
+    def _bd_download_youtube_page(self, candidate):
+        page_url = self._bd_get_youtube_page_url(candidate)
+        if not page_url:
+            raise RuntimeError("missing YouTube page URL")
+        if not YT_DLP_AVAILABLE:
+            raise RuntimeError("yt-dlp is not installed")
+
+        quality = self.bd_quality_var.get() if hasattr(self, "bd_quality_var") else "1080p"
+        fmt = self._yt_format_for_quality(quality, "youtube")
+        outtmpl = os.path.join(
+            self.browser_output_dir,
+            f"%(title)s_%(id)s_{self._bd_safe_filename(quality)}.%(ext)s")
+        opts = {
+            "format": fmt,
+            "outtmpl": outtmpl,
+            "quiet": True,
+            "no_warnings": False,
+            "retries": 3,
+            "fragment_retries": 3,
+            "nocheckcertificate": True,
+            "http_headers": self._bd_headers_for_ytdlp(candidate),
+            "progress_hooks": [h for h in [candidate.get("_progress_hook"), self._bd_progress_hook] if h],
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["web_safari", "android_vr"],
+                }
+            },
+        }
+        if FFMPEG_DIR:
+            opts["ffmpeg_location"] = FFMPEG_DIR
+            opts["merge_output_format"] = "mp4"
+        if NODE_PATH:
+            opts["js_runtimes"] = {"node": {"path": NODE_PATH}}
+
+        cookiefile = self._bd_cookiefile_from_header(candidate)
+        if cookiefile:
+            opts["cookiefile"] = cookiefile
+
+        self._bd_set_status(f"YouTube page download via yt-dlp: {quality}")
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(page_url, download=True)
+                if info:
+                    return ydl.prepare_filename(info)
+        finally:
+            if cookiefile:
+                try:
+                    os.remove(cookiefile)
+                except OSError:
+                    pass
+        return outtmpl
+
+    def _bd_headers_for_ytdlp(self, candidate):
+        headers = dict(candidate.get("headers") or {})
+        page_url = candidate.get("page_url") or ""
+        if page_url and not self._bd_get_header(headers, "Referer"):
+            headers["Referer"] = page_url
+        return headers
+
+    def _bd_get_header(self, headers, name):
+        wanted = name.lower()
+        for key, value in (headers or {}).items():
+            if str(key).lower() == wanted:
+                return value
+        return ""
+
+    def _bd_cookiefile_from_header(self, candidate):
+        cookiefile = self._bd_cookiefile_from_browser_cookies(candidate)
+        if cookiefile:
+            return cookiefile
+
+        cookie_header = self._bd_get_header(candidate.get("headers") or {}, "Cookie")
+        if not cookie_header:
+            return ""
+        pairs = []
+        for part in cookie_header.split(";"):
+            if "=" not in part:
+                continue
+            name, value = part.split("=", 1)
+            name = name.strip()
+            value = value.strip()
+            if not name:
+                continue
+            pairs.append((name.replace("\t", ""), value.replace("\t", "%09")))
+        if not pairs:
+            return ""
+        fd, path = tempfile.mkstemp(prefix="bd_youtube_", suffix=".cookies.txt")
+        domains = [".youtube.com", ".google.com", ".googlevideo.com"]
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("# Netscape HTTP Cookie File\n")
+            for domain in domains:
+                for name, value in pairs:
+                    f.write(f"{domain}\tTRUE\t/\tTRUE\t0\t{name}\t{value}\n")
+        return path
+
+    def _bd_cookiefile_from_browser_cookies(self, candidate):
+        cookies = candidate.get("cookies") or []
+        if not cookies:
+            return ""
+        fd, path = tempfile.mkstemp(prefix="bd_youtube_", suffix=".cookies.txt")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("# Netscape HTTP Cookie File\n")
+            for cookie in cookies:
+                domain = str(cookie.get("domain") or "").strip()
+                name = str(cookie.get("name") or "").replace("\t", "")
+                value = str(cookie.get("value") or "").replace("\t", "%09")
+                if not domain or not name:
+                    continue
+                include_subdomains = "TRUE" if domain.startswith(".") else "FALSE"
+                path_value = str(cookie.get("path") or "/").replace("\t", "")
+                secure = "TRUE" if cookie.get("secure") else "FALSE"
+                expires = cookie.get("expirationDate") or 0
+                try:
+                    expires = int(float(expires))
+                except (TypeError, ValueError):
+                    expires = 0
+                f.write(
+                    f"{domain}\t{include_subdomains}\t{path_value}\t"
+                    f"{secure}\t{expires}\t{name}\t{value}\n"
+                )
+        return path
+
+    def _bd_find_audio_pair(self, video_candidate):
+        with self.browser_candidates_lock:
+            candidates = list(self.browser_candidates)
+        same_page = [
+            c for c in candidates
+            if c.get("kind") == "audio"
+            and c.get("page_url") == video_candidate.get("page_url")
+            and "googlevideo.com" in c.get("host", "").lower()
+        ]
+        if not same_page:
+            return None
+        def score(c):
+            digits = re.findall(r"\d+", c.get("quality") or "")
+            return int(digits[0]) if digits else 0
+        return sorted(same_page, key=score, reverse=True)[0]
+
+    def _bd_download_youtube_pair(self, video_candidate, audio_candidate):
+        ffmpeg = os.path.join(FFMPEG_DIR, "ffmpeg.exe")
+        title = self._bd_safe_filename(video_candidate.get("page_title") or "video")
+        quality = self._bd_safe_filename(video_candidate.get("quality") or "video")
+        out_path = os.path.join(
+            self.browser_output_dir, f"{title}_{quality}_{int(time.time())}.mp4")
+        cmd = [ffmpeg, "-y", "-loglevel", "error"]
+        video_headers = self._bd_ffmpeg_headers(video_candidate.get("headers", {}))
+        audio_headers = self._bd_ffmpeg_headers(audio_candidate.get("headers", {}))
+        if video_headers:
+            cmd.extend(["-headers", video_headers])
+        cmd.extend(["-i", video_candidate["media_url"]])
+        if audio_headers:
+            cmd.extend(["-headers", audio_headers])
+        cmd.extend(["-i", audio_candidate["media_url"],
+                    "-c:v", "copy", "-c:a", "aac", "-shortest", out_path])
+        result = subprocess.run(cmd, capture_output=True)
+        if result.returncode != 0:
+            stderr = result.stderr.decode(errors="replace")[-500:]
+            raise RuntimeError(f"ffmpeg merge failed: {stderr}")
+        return out_path
+
+    def _bd_download_with_ytdlp(self, candidate):
+        if not YT_DLP_AVAILABLE:
+            raise RuntimeError("yt-dlp is not installed.")
+        title = self._bd_safe_filename(candidate.get("page_title") or "media")
+        quality = self._bd_safe_filename(candidate.get("quality") or candidate.get("kind") or "media")
+        outtmpl = os.path.join(
+            self.browser_output_dir, f"{title}_{quality}_{int(time.time())}.%(ext)s")
+        opts = {
+            "outtmpl": outtmpl,
+            "quiet": True,
+            "no_warnings": False,
+            "retries": 3,
+            "fragment_retries": 3,
+            "nocheckcertificate": True,
+            "http_headers": candidate.get("headers", {}),
+            "progress_hooks": [h for h in [candidate.get("_progress_hook"), self._bd_progress_hook] if h],
+        }
+        if FFMPEG_DIR:
+            opts["ffmpeg_location"] = FFMPEG_DIR
+            opts["merge_output_format"] = "mp4"
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(candidate["media_url"], download=True)
+            if info:
+                try:
+                    return ydl.prepare_filename(info)
+                except Exception:
+                    return outtmpl
+        return outtmpl
+
+    def _bd_progress_hook(self, data):
+        """Global progress hook — updates progress bar only (no candidate_id context)."""
+        if data.get("status") == "downloading":
+            total = data.get("total_bytes") or data.get("total_bytes_estimate") or 0
+            downloaded = data.get("downloaded_bytes") or 0
+            if total:
+                self._bd_set_progress(downloaded * 100 / total)
+        elif data.get("status") == "finished":
+            self._bd_set_progress(100)
+
+    def _bd_make_progress_hook(self, candidate_id, index, total):
+        """Return a progress hook closure that updates both the global bar and the row status."""
+        def hook(data):
+            status = data.get("status")
+            if status == "downloading":
+                file_total = data.get("total_bytes") or data.get("total_bytes_estimate") or 0
+                downloaded = data.get("downloaded_bytes") or 0
+                if file_total:
+                    pct = downloaded * 100 / file_total
+                    self._bd_set_progress(((index - 1) + pct / 100) * 100 / max(total, 1))
+                    speed = data.get("speed") or 0
+                    speed_str = f" {speed/1024:.0f}KB/s" if speed else ""
+                    self._bd_set_row_status(candidate_id, f"⬇ {pct:.0f}%{speed_str}", "dl_active")
+                else:
+                    self._bd_set_row_status(candidate_id, "⬇ ...", "dl_active")
+            elif status == "finished":
+                self._bd_set_row_status(candidate_id, "⏳ Merging...", "dl_active")
+        return hook
+
+    def _bd_check_download_audio(self, path, candidate):
+        if not path or not os.path.exists(path):
+            return path
+        if candidate.get("kind") not in ("video", "manifest"):
+            return path
+        stream_info = self._bd_read_stream_info(path)
+        if stream_info and "Video:" in stream_info and "Audio:" not in stream_info:
+            self._bd_set_status(
+                f"Downloaded without audio stream: {os.path.basename(path)}")
+        return path
+
+    def _bd_read_stream_info(self, path):
+        if not FFMPEG_DIR:
+            return ""
+        ffmpeg = os.path.join(FFMPEG_DIR, "ffmpeg.exe")
+        if not os.path.exists(ffmpeg):
+            return ""
+        try:
+            result = subprocess.run(
+                [ffmpeg, "-hide_banner", "-i", path],
+                capture_output=True, text=True, timeout=12
+            )
+            return (result.stderr or "") + (result.stdout or "")
+        except Exception:
+            return ""
+
+    def _bd_ffmpeg_headers(self, headers):
+        lines = []
+        for key, value in (headers or {}).items():
+            if str(key).lower() in self._BD_ALLOWED_HEADERS and value:
+                lines.append(f"{key}: {value}")
+        return "\r\n".join(lines) + ("\r\n" if lines else "")
+
+    def _bd_safe_filename(self, value):
+        value = re.sub(r'[\\/:*?"<>|]+', "_", str(value or "media")).strip()
+        value = re.sub(r"\s+", " ", value)
+        return (value[:90] or "media")
+
     def create_upload_tab(self):
         """Create upload tab (YouTube uploader)"""
         self.upload_frame = ttk.Frame(self.content_container)
@@ -2899,41 +4432,44 @@ class DouyinYouTubeTool:
                  font=('Segoe UI', 11, 'bold')).pack(anchor=tk.W, pady=(0, 10))
         
         # Upload treeview
-        upload_columns = ('Select', 'File', 'Size', 'Status', 'Actions')
-        self.upload_tree = ttk.Treeview(upload_list_frame, columns=upload_columns, 
+        # Columns: Select(0), File(1), Title(2), Size(3), Status(4), Actions(5)
+        upload_columns = ('Select', 'File', 'Title', 'Size', 'Status', 'Actions')
+        self.upload_tree = ttk.Treeview(upload_list_frame, columns=upload_columns,
                                        show='headings', height=6)
-        
+
         # Configure larger font for icons
         style = ttk.Style()
         style.configure("Large.Treeview", font=('Segoe UI', 11))
         style.configure("Large.Treeview.Heading", font=('Segoe UI', 10, 'bold'))
         self.upload_tree.configure(style="Large.Treeview")
-        
+
         self.upload_tree.heading('Select', text='✓')
         self.upload_tree.heading('File', text='📹 File')
+        self.upload_tree.heading('Title', text='✏️ Title (double-click to edit)')
         self.upload_tree.heading('Size', text='📊 Size')
         self.upload_tree.heading('Status', text='📋 Status')
         self.upload_tree.heading('Actions', text='🎛️ Actions')
-        
-        self.upload_tree.column('Select', width=50, anchor=tk.CENTER)
-        self.upload_tree.column('File', width=220)
-        self.upload_tree.column('Size', width=80, anchor=tk.CENTER)
-        self.upload_tree.column('Status', width=100, anchor=tk.CENTER)
-        self.upload_tree.column('Actions', width=140, anchor=tk.CENTER)
-        
+
+        self.upload_tree.column('Select', width=45, anchor=tk.CENTER, stretch=False)
+        self.upload_tree.column('File', width=160, stretch=False)
+        self.upload_tree.column('Title', width=280)
+        self.upload_tree.column('Size', width=70, anchor=tk.CENTER, stretch=False)
+        self.upload_tree.column('Status', width=110, anchor=tk.CENTER, stretch=False)
+        self.upload_tree.column('Actions', width=100, anchor=tk.CENTER, stretch=False)
+
         # Configure row colors for selection
         self.upload_tree.tag_configure('selected', background='#e3f2fd', foreground='#1976d2')
         self.upload_tree.tag_configure('unselected', background=self.colors['light'], foreground=self.colors['dark'])
-        
-        upload_v_scroll = ttk.Scrollbar(upload_list_frame, orient=tk.VERTICAL, 
+
+        upload_v_scroll = ttk.Scrollbar(upload_list_frame, orient=tk.VERTICAL,
                                        command=self.upload_tree.yview)
         self.upload_tree.configure(yscrollcommand=upload_v_scroll.set)
-        
+
         self.upload_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         upload_v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        
+
         # Bind events
-        self.upload_tree.bind('<Double-1>', self.toggle_upload_selection)
+        self.upload_tree.bind('<Double-1>', self._on_upload_tree_double_click)
         self.upload_tree.bind('<<TreeviewSelect>>', self.on_video_select)
         self.upload_tree.bind('<Button-1>', self.on_tree_click)
         self.upload_tree.bind('<Button-3>', self.show_context_menu)  # Right click
@@ -3848,14 +5384,18 @@ class DouyinYouTubeTool:
         for item in self.upload_tree.get_children():
             if self.upload_tree.item(item, 'values')[1] == file_name:
                 return  # Already exists
-        
+
+        auto_title = self._apply_title_template(file_name)
+
         # Insert with selected color and actions
+        # Columns: Select(0), File(1), Title(2), Size(3), Status(4), Actions(5)
         item = self.upload_tree.insert('', 'end', values=(
             "✓",
             file_name,
+            auto_title,
             file_size,
             "📋 Ready",
-            "🎬  📁"  # Larger action buttons with spacing
+            "🎬  📁"
         ), tags=('selected',))
         
         self.selected_videos.add(file_name)
@@ -3901,13 +5441,14 @@ class DouyinYouTubeTool:
         for video_info in self.video_files:
             file_path = os.path.join(self.download_folder, video_info['filename'])
             if os.path.exists(file_path):
-                # Insert with selected color and actions
+                auto_title = self._apply_title_template(video_info['filename'])
                 item = self.upload_tree.insert('', 'end', values=(
                     "✓",
                     video_info['filename'],
+                    auto_title,
                     video_info['size'],
                     "📋 Ready",
-                    "🎬  📁"  # Larger action buttons
+                    "🎬  📁"
                 ), tags=('selected',))
                 self.selected_videos.add(video_info['filename'])
             
@@ -3915,41 +5456,92 @@ class DouyinYouTubeTool:
         if self.video_files:
             self.log(f"📤 Updated upload list with {len(self.video_files)} videos")
         
-    def toggle_upload_selection(self, event):
-        """Toggle video selection"""
-        item = self.upload_tree.selection()[0] if self.upload_tree.selection() else None
+    def _apply_title_template(self, file_name):
+        """Apply title template from upload settings to a filename."""
+        template = self.upload_settings.get('title_template', '[FILENAME]')
+        name_no_ext = os.path.splitext(file_name)[0]
+        return template.replace('[FILENAME]', name_no_ext)
+
+    def _on_upload_tree_double_click(self, event):
+        """Route double-click: edit Title column inline, toggle selection otherwise."""
+        region = self.upload_tree.identify_region(event.x, event.y)
+        if region != 'cell':
+            return
+        column = self.upload_tree.identify_column(event.x)
+        item = self.upload_tree.identify_row(event.y)
         if not item:
             return
-            
+        if column == '#3':  # Title column
+            self._start_title_inline_edit(item)
+        else:
+            self._toggle_item_selection(item)
+
+    def _start_title_inline_edit(self, item):
+        """Open a floating Entry over the Title cell for inline editing."""
+        bbox = self.upload_tree.bbox(item, '#3')
+        if not bbox:
+            return
+        x, y, width, height = bbox
+
+        current_title = self.upload_tree.item(item, 'values')[2]
+
+        edit_var = tk.StringVar(value=current_title)
+        entry = tk.Entry(self.upload_tree, textvariable=edit_var,
+                         font=('Segoe UI', 10), relief=tk.FLAT,
+                         bg='#fffde7', fg='#212121',
+                         highlightthickness=1, highlightbackground='#1976d2')
+        entry.place(x=x, y=y, width=width, height=height)
+        entry.focus_set()
+        entry.select_range(0, tk.END)
+
+        def _commit(event=None):
+            new_title = edit_var.get().strip() or current_title
+            values = list(self.upload_tree.item(item, 'values'))
+            values[2] = new_title
+            self.upload_tree.item(item, values=values)
+            entry.destroy()
+
+        def _cancel(event=None):
+            entry.destroy()
+
+        entry.bind('<Return>', _commit)
+        entry.bind('<KP_Enter>', _commit)
+        entry.bind('<FocusOut>', _commit)
+        entry.bind('<Escape>', _cancel)
+
+    def _toggle_item_selection(self, item):
+        """Toggle the ✓ checkbox for a tree item."""
         values = self.upload_tree.item(item, 'values')
-        if values:
-            current_select = values[0]
-            new_select = "✓" if current_select != "✓" else ""
-            
-            new_values = list(values)
-            new_values[0] = new_select
-            
-            # Update color based on selection
-            if new_select == "✓":
-                self.upload_tree.item(item, values=new_values, tags=('selected',))
-                self.selected_videos.add(values[1])
-            else:
-                self.upload_tree.item(item, values=new_values, tags=('unselected',))
-                self.selected_videos.discard(values[1])
-            
-            self.update_upload_count()
-            
+        if not values:
+            return
+        new_select = "✓" if values[0] != "✓" else ""
+        new_values = list(values)
+        new_values[0] = new_select
+        if new_select == "✓":
+            self.upload_tree.item(item, values=new_values, tags=('selected',))
+            self.selected_videos.add(values[1])
+        else:
+            self.upload_tree.item(item, values=new_values, tags=('unselected',))
+            self.selected_videos.discard(values[1])
+        self.update_upload_count()
+
+    def toggle_upload_selection(self, event):
+        """Toggle video selection (kept for compatibility, routes to _toggle_item_selection)."""
+        item = self.upload_tree.selection()[0] if self.upload_tree.selection() else None
+        if item:
+            self._toggle_item_selection(item)
+
     def on_tree_click(self, event):
         """Handle tree click for selection"""
         region = self.upload_tree.identify_region(event.x, event.y)
         if region == "cell":
             item = self.upload_tree.identify_row(event.y)
             column = self.upload_tree.identify_column(event.x)
-            
+
             # Handle different column clicks
             if column == "#1":  # Select column
                 self.toggle_upload_selection_direct(item)
-            elif column == "#5":  # Actions column
+            elif column == "#6":  # Actions column (shifted by new Title col)
                 self.handle_action_click(event, item)
                 
     def handle_action_click(self, event, item):
@@ -3958,7 +5550,7 @@ class DouyinYouTubeTool:
             return
             
         # Get click position within the cell
-        bbox = self.upload_tree.bbox(item, "#5")
+        bbox = self.upload_tree.bbox(item, "#6")
         if bbox:
             cell_x = event.x - bbox[0]
             cell_width = bbox[2]
@@ -4896,56 +6488,49 @@ class DouyinYouTubeTool:
                                 if recommendations:
                                     self.log(f"⚠️ Shorts recommendations: {recommendations[0]}")
                         
-                        # Generate title
                         filename = os.path.basename(video_file)
-                        name_without_ext = os.path.splitext(filename)[0]
-                        title = f"{title_prefix}{name_without_ext}"
-                        
-                        # Create Shorts description
-                        description = f"📱 Vertical video optimized for mobile viewing\n"
-                        if shorts_info and shorts_info.get('is_shorts'):
-                            description += f"✅ {shorts_info.get('width')}x{shorts_info.get('height')}, {shorts_info.get('duration')}s\n"
-                        description += f"🎬 From Douyin collection\n"
-                        description += f"📊 File: {shorts_info.get('file_size_mb')}MB\n" if shorts_info else ""
-                        
+                        # Read title from tree column (user may have edited it)
+                        tree_item = None
+                        for _it in self.upload_tree.get_children():
+                            if self.upload_tree.item(_it)['values'][1] == filename:
+                                tree_item = _it
+                                break
+                        if tree_item:
+                            _tv = self.upload_tree.item(tree_item)['values']
+                            title = _tv[2] if _tv[2] else self._apply_title_template(filename)
+                        else:
+                            title = self._apply_title_template(filename)
+
+                        description = self.upload_settings.get('description', '')
+
                         # Upload as Shorts
                         self.log(f"📱 Uploading as YouTube Shorts: {title}")
                         result = self.youtube_uploader.upload_shorts_video(
-                            video_file, title, description, tags, privacy
+                            video_file, title, description, tags, privacy,
+                            private_share_emails=self.upload_settings.get('private_share_emails', ''),
+                            made_for_kids=self.upload_settings.get('made_for_kids', 'no') == 'yes'
                         )
-                        
+
                         if result['success']:
                             successful += 1
                             video_url = result.get('url', 'Unknown URL')
                             self.log(f"✅ Shorts upload successful: {video_url}")
-                            
-                            # Update tree with success
-                            for item in self.upload_tree.get_children():
-                                if self.upload_tree.item(item)['values'][1] == os.path.basename(video_file):
-                                    self.upload_tree.item(item, values=(
-                                        self.upload_tree.item(item)['values'][0],
-                                        self.upload_tree.item(item)['values'][1],
-                                        self.upload_tree.item(item)['values'][2],
-                                        "📱 Shorts ✅",
-                                        "🔗 Open"
-                                    ))
-                                    break
+
+                            if tree_item:
+                                v = list(self.upload_tree.item(tree_item)['values'])
+                                v[4] = "📱 Shorts ✅"
+                                v[5] = "🔗 Open"
+                                self.upload_tree.item(tree_item, values=v)
                         else:
                             failed += 1
                             error = result.get('error', 'Unknown error')
                             self.log(f"❌ Shorts upload failed: {error}")
-                            
-                            # Update tree with failure
-                            for item in self.upload_tree.get_children():
-                                if self.upload_tree.item(item)['values'][1] == os.path.basename(video_file):
-                                    self.upload_tree.item(item, values=(
-                                        self.upload_tree.item(item)['values'][0],
-                                        self.upload_tree.item(item)['values'][1],
-                                        self.upload_tree.item(item)['values'][2],
-                                        "📱 Failed ❌",
-                                        "❌ Error"
-                                    ))
-                                    break
+
+                            if tree_item:
+                                v = list(self.upload_tree.item(tree_item)['values'])
+                                v[4] = "📱 Failed ❌"
+                                v[5] = "❌ Error"
+                                self.upload_tree.item(tree_item, values=v)
                                     
                     except Exception as e:
                         failed += 1
@@ -5051,75 +6636,66 @@ class DouyinYouTubeTool:
                         self.upload_status_var.set(f"🎯 Processing {i+1}/{total_files}...")
                         self.root.update_idletasks()
                         
-                        # Generate title
                         filename = os.path.basename(video_file)
-                        name_without_ext = os.path.splitext(filename)[0]
-                        title = f"{title_prefix}{name_without_ext}"
-                        
-                        # Create description
-                        description = f"🎯 High-quality video optimized for YouTube\n"
-                        description += f"📊 Quality preset: {quality_preset}\n"
-                        description += f"🎬 Processed with advanced encoding\n"
-                        description += f"📱 Optimized for all devices\n"
-                        
+                        # Read title from tree column (user may have edited it)
+                        tree_item = None
+                        for _it in self.upload_tree.get_children():
+                            if self.upload_tree.item(_it)['values'][1] == filename:
+                                tree_item = _it
+                                break
+                        if tree_item:
+                            tree_vals = self.upload_tree.item(tree_item)['values']
+                            title = tree_vals[2] if tree_vals[2] else self._apply_title_template(filename)
+                        else:
+                            title = self._apply_title_template(filename)
+
+                        description = self.upload_settings.get('description', '')
+
                         # Upload with optimization
                         self.log(f"🎯 Uploading with optimization: {title}")
-                        
+
                         start_time = time.time()
                         result = self.youtube_uploader.upload_optimized_video(
                             video_file, title, description, tags, "22", privacy,
-                            optimize_quality=optimize, quality_preset=quality_preset
+                            optimize_quality=optimize, quality_preset=quality_preset,
+                            private_share_emails=self.upload_settings.get('private_share_emails', ''),
+                            made_for_kids=self.upload_settings.get('made_for_kids', 'no') == 'yes'
                         )
                         end_time = time.time()
-                        
+
                         processing_time = end_time - start_time
                         total_optimization_time += processing_time
-                        
+
                         if result['success']:
                             successful += 1
                             video_url = result.get('url', 'Unknown URL')
-                            
-                            # Log optimization info
+
                             if result.get('optimization'):
                                 opt_info = result['optimization']
                                 self.log(f"✅ Optimized: {opt_info['input_size_mb']}MB → {opt_info['output_size_mb']}MB")
                                 self.log(f"📊 Compression: {opt_info['compression_ratio']:.2f}x")
-                            
+
                             self.log(f"✅ Upload successful: {video_url}")
                             self.log(f"⏱️ Processing time: {processing_time:.1f}s")
-                            
-                            # Update tree with success
-                            for item in self.upload_tree.get_children():
-                                if self.upload_tree.item(item)['values'][1] == os.path.basename(video_file):
-                                    status = "🎯 Optimized ✅"
-                                    if result.get('optimization'):
-                                        opt_info = result['optimization']
-                                        status += f" ({opt_info['compression_ratio']:.1f}x)"
-                                    
-                                    self.upload_tree.item(item, values=(
-                                        self.upload_tree.item(item)['values'][0],
-                                        self.upload_tree.item(item)['values'][1],
-                                        self.upload_tree.item(item)['values'][2],
-                                        status,
-                                        "🔗 Open"
-                                    ))
-                                    break
+
+                            if tree_item:
+                                v = list(self.upload_tree.item(tree_item)['values'])
+                                status = "🎯 Optimized ✅"
+                                if result.get('optimization'):
+                                    status += f" ({result['optimization']['compression_ratio']:.1f}x)"
+                                v[4] = status
+                                v[5] = "🔗 Open"
+                                self.upload_tree.item(tree_item, values=v)
                         else:
                             failed += 1
                             error = result.get('error', 'Unknown error')
                             self.log(f"❌ Upload failed: {error}")
-                            
-                            # Update tree with failure
-                            for item in self.upload_tree.get_children():
-                                if self.upload_tree.item(item)['values'][1] == os.path.basename(video_file):
-                                    self.upload_tree.item(item, values=(
-                                        self.upload_tree.item(item)['values'][0],
-                                        self.upload_tree.item(item)['values'][1],
-                                        self.upload_tree.item(item)['values'][2],
-                                        "🎯 Failed ❌",
-                                        "❌ Error"
-                                    ))
-                                    break
+
+                            if tree_item:
+                                v = list(self.upload_tree.item(tree_item)['values'])
+                                v[4] = "🎯 Failed ❌"
+                                v[5] = "❌ Error"
+                                self.upload_tree.item(tree_item, values=v)
                                     
                     except Exception as e:
                         failed += 1
@@ -5707,7 +7283,7 @@ class DouyinYouTubeTool:
             values = list(self.upload_tree.item(item, 'values'))
             values[0] = "✓"
             # Ensure actions column exists
-            if len(values) < 5:
+            if len(values) < 6:
                 values.append("🎬  📁")
             self.upload_tree.item(item, values=values, tags=('selected',))
             self.selected_videos.add(values[1])
@@ -5721,7 +7297,7 @@ class DouyinYouTubeTool:
             values = list(self.upload_tree.item(item, 'values'))
             values[0] = ""
             # Ensure actions column exists
-            if len(values) < 5:
+            if len(values) < 6:
                 values.append("🎬  📁")
             self.upload_tree.item(item, values=values, tags=('unselected',))
             
@@ -5861,26 +7437,29 @@ class DouyinYouTubeTool:
             for i, (item, file_path, file_name) in enumerate(selected_files):
                 # Update status
                 values = list(self.upload_tree.item(item, 'values'))
-                values[3] = "📤 Uploading..."
+                values[4] = "📤 Uploading..."
                 self.upload_tree.item(item, values=values)
-                
-                title = f"{self.title_prefix_var.get()}{os.path.splitext(file_name)[0]}"
+
+                # Read title from tree column (user may have edited it)
+                title = values[2] if values[2] else self._apply_title_template(file_name)
                 tags = [tag.strip() for tag in self.tags_var.get().split(',') if tag.strip()]
-                
+
                 self.log(f"📤 Uploading {i+1}/{total}: {file_name}")
                 
                 try:
                     result = self.youtube_uploader.upload_video(
                         video_file=file_path,
                         title=title,
-                        description=f"Video from Douyin\n\n#douyin #video",
+                        description=self.upload_settings.get('description', ''),
                         tags=tags,
-                        privacy_status=self.privacy_var.get()
+                        privacy_status=self.privacy_var.get(),
+                        private_share_emails=self.upload_settings.get('private_share_emails', ''),
+                        made_for_kids=self.upload_settings.get('made_for_kids', 'no') == 'yes'
                     )
-                    
+
                     if result['success']:
                         successful += 1
-                        values[3] = "✅ Uploaded"
+                        values[4] = "✅ Uploaded"
                         privacy_status = self.privacy_var.get()
                         video_url = result['url']
                         video_id = result.get('video_id', '')
@@ -5891,6 +7470,14 @@ class DouyinYouTubeTool:
                         self.log(f"   🔗 URL: {video_url}")
                         self.log(f"   🆔 Video ID: {video_id}")
                         self.log(f"   🔒 Privacy: {privacy_status}")
+                        # Log private share result
+                        share_info = result.get('private_share')
+                        if share_info:
+                            if share_info.get('success'):
+                                emails_shared = ', '.join(share_info.get('shared_with', []))
+                                self.log(f"   📧 Shared with: {emails_shared}")
+                            else:
+                                self.log(f"   ⚠️ Private share failed: {share_info.get('error', 'unknown')}")
                         
                         # Verify if video actually exists on YouTube
                         if video_id:
@@ -5906,7 +7493,7 @@ class DouyinYouTubeTool:
                                 elif verify_result.get('is_demo'):
                                     self.log(f"   ⚠️  {verify_result['message']}")
                                     self.log(f"   💡 To upload real videos, use OAuth authentication with credentials.json")
-                                    values[3] = "🎭 Demo"
+                                    values[4] = "🎭 Demo"
                                 else:
                                     self.log(f"   ❌ Could not verify video existence: {verify_result.get('error', 'Unknown error')}")
                                 
@@ -5928,16 +7515,12 @@ class DouyinYouTubeTool:
                                         
                                     # Update status in table based on actual status
                                     if upload_status == 'failed':
-                                        values[3] = "❌ Failed"
+                                        values[4] = "❌ Failed"
                                         successful -= 1
                                         failed += 1
-                                    elif processing_status == 'processing':
-                                        values[3] = "⏳ Processing"
                                     elif rejection_reason:
-                                        values[3] = "🚫 Rejected"
-                                        values[3] = "⏳ Processing"
-                                    elif rejection_reason:
-                                        values[3] = "🚫 Rejected"
+                                        values[4] = "🚫 Rejected"
+                                    # processing = YouTube đang xử lý nội bộ sau upload thành công → giữ ✅ Uploaded
                                         
                             except Exception as status_error:
                                 self.log(f"   ⚠️  Could not verify status: {status_error}")
@@ -5964,21 +7547,20 @@ class DouyinYouTubeTool:
                             
                     else:
                         failed += 1
-                        values[3] = "❌ Failed"
+                        values[4] = "❌ Failed"
                         error_msg = result.get('error', 'Unknown error')
                         self.log(f"❌ Upload failed: {error_msg}")
-                        
-                        # Specific error handling
+
                         if "quota" in error_msg.lower():
                             self.log(f"   💡 This might be a YouTube API quota issue")
                         elif "forbidden" in error_msg.lower():
                             self.log(f"   💡 Check if your account has upload permissions")
                         elif "invalid" in error_msg.lower():
                             self.log(f"   💡 Check video file format and size")
-                        
+
                 except Exception as e:
                     failed += 1
-                    values[3] = "❌ Error"
+                    values[4] = "❌ Error"
                     self.log(f"❌ Upload error: {e}")
                     
                 self.upload_tree.item(item, values=values)
@@ -6345,7 +7927,68 @@ class DouyinYouTubeTool:
                                    values=["public", "unlisted", "private"], state="readonly", 
                                    font=('Segoe UI', 10), width=15)
         privacy_combo.pack(anchor=tk.W, pady=(5,0))
-        
+
+        def _toggle_private_share(*_):
+            if self.config_privacy_var.get() == 'private':
+                private_share_frame.pack(fill=tk.X, pady=(8, 0))
+            else:
+                private_share_frame.pack_forget()
+
+        self.config_privacy_var.trace_add('write', _toggle_private_share)
+
+        private_share_frame = tk.Frame(privacy_section, bg=self.colors['surface'])
+
+        # Header row
+        hdr = tk.Frame(private_share_frame, bg=self.colors['surface'])
+        hdr.pack(fill=tk.X)
+        tk.Label(hdr, text="📧 Share with (emails)",
+                font=('Segoe UI', 9, 'bold'), bg=self.colors['surface'],
+                fg=self.colors['dark']).pack(side=tk.LEFT)
+        self._ps_count_var = tk.StringVar(value="")
+        tk.Label(hdr, textvariable=self._ps_count_var,
+                font=('Segoe UI', 8), bg=self.colors['surface'],
+                fg=self.colors['primary']).pack(side=tk.LEFT, padx=(8, 0))
+
+        # Format hint
+        tk.Label(private_share_frame,
+                text="Mỗi email cách nhau bằng dấu phẩy, không có khoảng trắng  •  Ví dụ: a@gmail.com,b@gmail.com",
+                font=('Segoe UI', 8), bg=self.colors['surface'],
+                fg='#888888').pack(anchor=tk.W, pady=(1, 0))
+
+        self.config_private_share_emails_var = tk.StringVar(
+            value=self.upload_settings.get('private_share_emails', ''))
+
+        # Text widget (multi-line, dễ đọc hơn Entry khi có nhiều email)
+        ps_text_frame = tk.Frame(private_share_frame, bg='white',
+                                 relief=tk.FLAT, bd=1,
+                                 highlightthickness=1,
+                                 highlightbackground='#cccccc')
+        ps_text_frame.pack(fill=tk.X, pady=(4, 0))
+        self._ps_text = tk.Text(ps_text_frame, height=3,
+                                font=('Segoe UI', 9), relief=tk.FLAT, bd=4,
+                                bg='white', fg=self.colors['dark'],
+                                wrap=tk.WORD)
+        self._ps_text.pack(fill=tk.X)
+        # Populate from saved settings
+        _saved_emails = self.upload_settings.get('private_share_emails', '')
+        if _saved_emails:
+            self._ps_text.insert('1.0', _saved_emails)
+
+        # Live counter
+        def _update_email_count(*_):
+            raw = self._ps_text.get('1.0', tk.END).strip()
+            # Sync to StringVar (strip whitespace/newlines for storage)
+            clean = ','.join(e.strip() for e in raw.replace('\n', ',').split(',') if e.strip())
+            self.config_private_share_emails_var.set(clean)
+            count = len([e for e in clean.split(',') if e.strip()]) if clean else 0
+            self._ps_count_var.set(f"({count} email{'s' if count != 1 else ''})" if count else "")
+
+        self._ps_text.bind('<KeyRelease>', _update_email_count)
+        _update_email_count()  # Init count
+
+        # Show/hide based on current value
+        _toggle_private_share()
+
         # Made for Kids setting
         kids_frame = tk.Frame(privacy_grid, bg=self.colors['surface'])
         kids_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10, pady=15)
@@ -6354,7 +7997,7 @@ class DouyinYouTubeTool:
                 bg=self.colors['surface'], fg=self.colors['dark']).pack(anchor=tk.W)
         self.config_kids_var = tk.StringVar(value=self.upload_settings.get('made_for_kids', 'no'))
         kids_combo = ttk.Combobox(kids_frame, textvariable=self.config_kids_var,
-                                values=[("no", "General Audience"), ("yes", "Made for Kids")], 
+                                values=["no", "yes"],
                                 state="readonly", font=('Segoe UI', 10), width=15)
         kids_combo.pack(anchor=tk.W, pady=(5,0))
         
@@ -6659,6 +8302,13 @@ class DouyinYouTubeTool:
             'description': self.config_desc_text.get('1.0', tk.END).strip(),
             'tags': self.config_tags_var.get(),
             'privacy': self.config_privacy_var.get(),
+            'private_share_emails': (
+                ','.join(e.strip() for e in
+                         self._ps_text.get('1.0', tk.END).strip().replace('\n', ',').split(',')
+                         if e.strip())
+                if hasattr(self, '_ps_text') else
+                self.config_private_share_emails_var.get() if hasattr(self, 'config_private_share_emails_var') else ''
+            ),
             'made_for_kids': self.config_kids_var.get(),
             'age_restriction': self.config_age_restriction_var.get(),
             'category': self.config_category_var.get(),
@@ -6673,9 +8323,13 @@ class DouyinYouTubeTool:
             'thumbnail_path': self.config_thumb_path_var.get()
         })
         
+        # Sync privacy_var so upload thread always reads the latest value
+        if hasattr(self, 'privacy_var'):
+            self.privacy_var.set(self.upload_settings['privacy'])
+
         # Save to file
         self.save_upload_settings()
-        
+
         # Show comprehensive confirmation
         messagebox.showinfo(
             "Configuration Saved", 

@@ -9,6 +9,7 @@ import os
 import json
 import pickle
 import time
+import socket
 import subprocess
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -712,17 +713,17 @@ class YouTubeUploader:
         # Create media upload object
         media = MediaFileUpload(
             video_file,
-            chunksize=-1,  # Upload in single chunk
+            chunksize=1024*1024*8,  # 8MB chunks for retry support
             resumable=True
         )
-        
+
         # Execute upload
         insert_request = self.youtube.videos().insert(
             part=','.join(body.keys()),
             body=body,
             media_body=media
         )
-        
+
         return self._resumable_upload(insert_request)
         
     def upload_optimized_video(self, video_file, title, description="", tags=None, category_id="22", 
@@ -984,17 +985,17 @@ class YouTubeUploader:
         # Create media upload object
         media = MediaFileUpload(
             video_file,
-            chunksize=-1,  # Upload in single chunk
+            chunksize=1024*1024*8,  # 8MB chunks for retry support
             resumable=True
         )
-        
+
         # Execute upload
         insert_request = self.youtube.videos().insert(
             part=','.join(body.keys()),
             body=body,
             media_body=media
         )
-        
+
         # Upload and add Shorts info to result
         result = self._resumable_upload(insert_request)
         if result.get('success'):
@@ -1006,30 +1007,28 @@ class YouTubeUploader:
     def _resumable_upload(self, insert_request):
         """Handle resumable upload with retry logic"""
         response = None
-        error = None
         retry = 0
-        
+        max_retries = 3
+
         while response is None:
             try:
                 status, response = insert_request.next_chunk()
                 if response is not None:
                     if 'id' in response:
-                        # Get additional video info
                         video_id = response['id']
                         video_url = f"https://www.youtube.com/watch?v={video_id}"
-                        
-                        # Check if video is actually available
+
                         try:
                             video_info = self.youtube.videos().list(
                                 part='snippet,status,processingDetails',
                                 id=video_id
                             ).execute()
-                            
+
                             if video_info['items']:
                                 video_data = video_info['items'][0]
                                 processing_status = video_data.get('processingDetails', {}).get('processingStatus', 'unknown')
                                 upload_status = video_data.get('status', {}).get('uploadStatus', 'unknown')
-                                
+
                                 return {
                                     'success': True,
                                     'video_id': video_id,
@@ -1044,7 +1043,6 @@ class YouTubeUploader:
                                     'error': 'Video uploaded but not found in channel. May need processing time.'
                                 }
                         except Exception as info_error:
-                            # Still consider successful if we got video ID
                             return {
                                 'success': True,
                                 'video_id': video_id,
@@ -1059,23 +1057,36 @@ class YouTubeUploader:
                             'success': False,
                             'error': f"Upload failed: {response}"
                         }
-                        
+
             except HttpError as e:
                 if e.resp.status in [500, 502, 503, 504]:
-                    # Retriable error
                     retry += 1
-                    if retry > 5:
+                    if retry > max_retries:
                         return {
                             'success': False,
                             'error': f"Max retries exceeded: {e}"
                         }
-                    time.sleep(2 ** retry)
+                    wait = min(2 ** retry, 60)
+                    print(f"⚠️ Server error {e.resp.status}, retry {retry}/{max_retries} sau {wait}s...")
+                    time.sleep(wait)
                 else:
                     return {
                         'success': False,
                         'error': f"HTTP Error: {e}"
                     }
-                    
+
+            except (ConnectionResetError, ConnectionAbortedError, ConnectionError,
+                    socket.error, OSError) as e:
+                retry += 1
+                if retry > max_retries:
+                    return {
+                        'success': False,
+                        'error': f"Upload failed after {max_retries} retries: {e}"
+                    }
+                wait = min(2 ** retry, 60)
+                print(f"⚠️ Lỗi mạng ({type(e).__name__}), retry {retry}/{max_retries} sau {wait}s...")
+                time.sleep(wait)
+
             except Exception as e:
                 return {
                     'success': False,
