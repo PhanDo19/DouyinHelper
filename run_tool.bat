@@ -8,8 +8,14 @@ echo.
 echo Starting application...
 echo.
 
-REM Run the tool with py command (Windows Python Launcher)
-py douyin_youtube_tool.py
+pushd "%~dp0"
+
+REM Prefer the project environment so yt-dlp and yt-dlp-ejs stay in sync.
+if exist ".venv\Scripts\python.exe" (
+    ".venv\Scripts\python.exe" douyin_youtube_tool.py
+) else (
+    py douyin_youtube_tool.py
+)
 
 REM Check exit code
 if errorlevel 1 (
@@ -24,3 +30,4 @@ if errorlevel 1 (
 echo.
 echo Press any key to exit...
 pause >nul
+popd

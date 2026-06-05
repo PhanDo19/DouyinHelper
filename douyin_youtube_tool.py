@@ -2548,21 +2548,13 @@ class DouyinYouTubeTool:
             "quiet": True,
             "no_warnings": False,
             "progress_hooks": [self._yt_progress_hook],
-            # yt-dlp 2026+ default clients (tv_embedded/ios removed by YouTube)
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["android_vr", "web_safari"],
-                }
-            },
         }
         # FFmpeg
         if FFMPEG_DIR:
             opts["ffmpeg_location"] = FFMPEG_DIR
             opts["merge_output_format"] = "mp4"
             opts["postprocessors"] = [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}]
-        # Node.js for n-signature solving (yt-dlp 2026+ requires JS runtime)
-        if NODE_PATH:
-            opts["js_runtimes"] = {"node": {"path": NODE_PATH}}
+        self._yt_enable_js_challenge_support(opts)
         # Cookies file (manually chosen by user)
         cookies = self.yt_cookies_var.get().strip() if hasattr(self, 'yt_cookies_var') else ""
         if cookies:
@@ -2577,6 +2569,15 @@ class DouyinYouTubeTool:
             if "cookiesfrombrowser" in extra:
                 opts.pop("cookiefile", None)
         return opts
+
+    @staticmethod
+    def _yt_enable_js_challenge_support(opts: dict) -> None:
+        """Enable YouTube's external JavaScript challenge solver."""
+        if NODE_PATH:
+            opts["js_runtimes"] = {"node": {"path": NODE_PATH}}
+        # The project venv includes yt-dlp-ejs. This also lets installations
+        # without the companion package fetch the official solver on demand.
+        opts["remote_components"] = ["ejs:github"]
 
     def _yt_progress_hook(self, d: dict):
         """yt-dlp progress hook — called from download thread."""
@@ -3018,9 +3019,8 @@ window.__ytCaptured = window.__ytCaptured || {};
             "no_warnings": True,
             "extract_flat": True,
             "skip_download": True,
-            # tv_embedded bypasses bot-check for public video metadata
-            "extractor_args": {"youtube": {"player_client": ["tv_embedded", "ios", "web"]}},
         }
+        self._yt_enable_js_challenge_support(opts)
         if cookies and os.path.exists(cookies):
             opts["cookiefile"] = cookies
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -4050,17 +4050,11 @@ window.__ytCaptured = window.__ytCaptured || {};
             "nocheckcertificate": True,
             "http_headers": self._bd_headers_for_ytdlp(candidate),
             "progress_hooks": [h for h in [candidate.get("_progress_hook"), self._bd_progress_hook] if h],
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["web_safari", "android_vr"],
-                }
-            },
         }
         if FFMPEG_DIR:
             opts["ffmpeg_location"] = FFMPEG_DIR
             opts["merge_output_format"] = "mp4"
-        if NODE_PATH:
-            opts["js_runtimes"] = {"node": {"path": NODE_PATH}}
+        self._yt_enable_js_challenge_support(opts)
 
         cookiefile = self._bd_cookiefile_from_header(candidate)
         if cookiefile:
