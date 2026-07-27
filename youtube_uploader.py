@@ -24,7 +24,9 @@ class YouTubeUploader:
         self.youtube = None
         self.scopes = [
             "https://www.googleapis.com/auth/youtube.upload",
-            "https://www.googleapis.com/auth/youtube.readonly"
+            "https://www.googleapis.com/auth/youtube.readonly",
+            # force-ssl is required for videos().update() (editing metadata).
+            "https://www.googleapis.com/auth/youtube.force-ssl"
         ]
         
         # Advanced upload settings

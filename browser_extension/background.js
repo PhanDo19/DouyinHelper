@@ -19,6 +19,35 @@ const recentKeys = new Map();
 const activeJobsByTab = new Map();
 let currentJob = null;
 
+// MV3 service workers are suspended after ~30s idle, so in-memory state
+// (currentJob / activeJobsByTab) can be wiped between events. Persist the
+// active batch job to session storage and rehydrate it on every wake-up.
+async function persistCurrentJob() {
+  try {
+    await chrome.storage.session.set({ currentJob });
+  } catch (_) {}
+}
+
+async function rehydrateCurrentJob() {
+  if (currentJob) return;
+  try {
+    const data = await chrome.storage.session.get({ currentJob: null });
+    if (data.currentJob) {
+      currentJob = data.currentJob;
+      if (currentJob.tabId !== undefined) {
+        activeJobsByTab.set(currentJob.tabId, currentJob);
+      }
+    }
+  } catch (_) {}
+}
+
+async function clearCurrentJob() {
+  currentJob = null;
+  try {
+    await chrome.storage.session.remove("currentJob");
+  } catch (_) {}
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -114,6 +143,11 @@ function getCookiesForUrl(url) {
   });
 }
 
+// SECURITY: this gathers Google/YouTube auth cookies (including login session
+// tokens) and sends them to the local downloader app over plain HTTP on
+// 127.0.0.1, gated only by the shared token. Required to download private /
+// age-restricted videos. Only enable the extension while you actually need it,
+// and keep the token private.
 async function collectAuthCookies(payload) {
   const urls = new Set();
   const pageUrl = payload.page_url || "";
@@ -252,7 +286,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   pageByTab.delete(tabId);
   activeJobsByTab.delete(tabId);
   if (currentJob && currentJob.tabId === tabId) {
-    currentJob = null;
+    clearCurrentJob();
   }
 });
 
@@ -289,6 +323,7 @@ function createTab(url) {
 }
 
 async function pollBatchQueue() {
+  await rehydrateCurrentJob();
   if (currentJob) return;
   let body;
   try {
@@ -306,12 +341,13 @@ async function pollBatchQueue() {
       closing: false
     };
     activeJobsByTab.set(tab.id, currentJob);
+    await persistCurrentJob();
   } catch (err) {
     await postLocal("/batch/fail", {
       id: body.job.id,
       reason: err.message || String(err)
     });
-    currentJob = null;
+    await clearCurrentJob();
   }
 }
 
@@ -322,17 +358,21 @@ function closeBatchTab(tabId, jobId) {
   setTimeout(() => {
     chrome.tabs.remove(tabId, () => {
       activeJobsByTab.delete(tabId);
-      if (currentJob && currentJob.id === jobId) currentJob = null;
-      pollBatchQueue();
+      if (currentJob && currentJob.id === jobId) {
+        clearCurrentJob().then(pollBatchQueue);
+      } else {
+        pollBatchQueue();
+      }
     });
   }, 3500);
 }
 
 async function checkBatchTimeout() {
+  await rehydrateCurrentJob();
   if (!currentJob) return;
   if (Date.now() - currentJob.openedAt < 70000) return;
   const job = currentJob;
-  currentJob = null;
+  await clearCurrentJob();
   activeJobsByTab.delete(job.tabId);
   chrome.tabs.remove(job.tabId, () => {});
   await postLocal("/batch/fail", {
@@ -341,5 +381,17 @@ async function checkBatchTimeout() {
   });
 }
 
-setInterval(pollBatchQueue, 2000);
-setInterval(checkBatchTimeout, 5000);
+function tick() {
+  pollBatchQueue();
+  checkBatchTimeout();
+}
+
+// Fast cadence while the service worker is alive...
+setInterval(tick, 2000);
+// ...plus an alarm to wake a suspended MV3 worker. Chrome clamps alarm
+// periods to ~30s minimum, so this is the recovery/heartbeat path, not the
+// primary one — batches still progress (slower) even after the worker sleeps.
+chrome.alarms.create("batchHeartbeat", { periodInMinutes: 0.5 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === "batchHeartbeat") tick();
+});

@@ -20,11 +20,13 @@ from tkinter import ttk, messagebox, filedialog, scrolledtext, simpledialog
 
 
 # Standard library imports
+import faulthandler
 import json
 import os
 import platform
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -902,6 +904,8 @@ YT_OUTPUT_DIR = os.path.join(_THIS_DIR, "output", "YouTube")
 YT_HISTORY_FILE = os.path.join(_THIS_DIR, "yt_history.txt")
 BROWSER_DETECTOR_PORT = 8765
 BROWSER_OUTPUT_DIR = os.path.join(_THIS_DIR, "output", "BrowserDetector")
+HANG_WATCHDOG_LOG = os.path.join(_THIS_DIR, "hang_watchdog.log")
+HANG_WATCHDOG_TIMEOUT = 10  # seconds without a mainloop heartbeat before dumping stacks
 BROWSER_EXTENSION_DIR = os.path.join(_THIS_DIR, "browser_extension")
 
 # Auto-detect ffmpeg bundled in project
@@ -2116,6 +2120,114 @@ class DouyinYouTubeTool:
                     "value":   value,
                 })
         return cookies
+
+    @staticmethod
+    def _sapisidhash(sapisid: str, origin: str = "https://studio.youtube.com") -> str:
+        """Compute the SAPISIDHASH auth header Google's internal APIs require.
+
+        Format: "<ts>_<sha1(ts + ' ' + SAPISID + ' ' + origin)>"
+        """
+        import hashlib as _hashlib
+        ts = str(int(time.time()))
+        digest = _hashlib.sha1(f"{ts} {sapisid} {origin}".encode("utf-8")).hexdigest()
+        return f"{ts}_{digest}"
+
+    def _studio_share_private(self, video_id: str, emails_str: str,
+                              browser: str = "chrome") -> dict:
+        """Share a PRIVATE video with specific emails via YouTube Studio's
+        internal metadata_update API, authenticated with the user's browser
+        cookies + SAPISIDHASH (the official Data API can't do this)."""
+        import requests as _requests
+
+        emails = [e.strip() for e in emails_str.split(",") if e.strip()]
+        if not emails:
+            return {"success": False, "error": "Không có email hợp lệ"}
+        if not video_id:
+            return {"success": False, "error": "Thiếu video_id"}
+
+        # Pull auth cookies straight from the logged-in browser profile.
+        try:
+            raw_cookies = self._extract_chrome_cookies_direct(browser)
+        except Exception as exc:
+            return {"success": False,
+                    "error": f"Không đọc được cookie từ {browser}: {exc}"}
+
+        jar = {c["name"]: c["value"] for c in raw_cookies}
+        sapisid = jar.get("SAPISID") or jar.get("__Secure-3PAPISID")
+        if not sapisid:
+            return {"success": False,
+                    "error": "Cookie thiếu SAPISID — hãy đăng nhập YouTube trên "
+                             f"{browser} trước."}
+        if not jar.get("SID") and not jar.get("__Secure-1PSID"):
+            return {"success": False,
+                    "error": "Cookie thiếu SID — chưa đăng nhập đầy đủ."}
+
+        origin = "https://studio.youtube.com"
+        sapisidhash = self._sapisidhash(sapisid, origin)
+        headers = {
+            "authorization": (
+                f"SAPISIDHASH {sapisidhash} "
+                f"SAPISID1PHASH {sapisidhash} "
+                f"SAPISID3PHASH {sapisidhash}"
+            ),
+            "content-type": "application/json",
+            "origin": origin,
+            "x-origin": origin,
+            "referer": f"{origin}/",
+            "x-goog-authuser": "0",
+            "x-youtube-client-name": "62",
+            "x-youtube-client-version": "1.20260616.00.00",
+            "user-agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+            ),
+        }
+
+        payload = {
+            "encryptedVideoId": video_id,
+            "privacyState": {"newPrivacy": "PRIVATE"},
+            "privateShare": {
+                "notifyViaEmail": True,
+                "shareEmails": ", ".join(emails),
+            },
+            "videoReadMask": {"privateShare": {"all": True}},
+            "context": {
+                "client": {
+                    "clientName": 62,
+                    "clientVersion": "1.20260616.00.00",
+                    "hl": "en",
+                    "gl": "VN",
+                    "utcOffsetMinutes": 420,
+                    "userInterfaceTheme": "USER_INTERFACE_THEME_DARK",
+                }
+            },
+        }
+
+        try:
+            resp = _requests.post(
+                f"{origin}/youtubei/v1/video_manager/metadata_update?alt=json",
+                headers=headers,
+                cookies=jar,
+                json=payload,
+                timeout=30,
+            )
+        except Exception as exc:
+            return {"success": False, "error": f"Request lỗi: {exc}"}
+
+        if resp.status_code == 200:
+            # Studio returns 200 even for some logical errors; surface the body
+            # if it doesn't look like a success.
+            body = resp.text or ""
+            if '"responseStatus"' in body and "ERROR" in body.upper():
+                return {"success": False,
+                        "error": f"Studio từ chối: {body[:300]}"}
+            return {"success": True, "shared_with": emails}
+        if resp.status_code in (401, 403):
+            return {"success": False,
+                    "error": f"HTTP {resp.status_code}: cookie hết hạn hoặc "
+                             f"không đủ quyền. Đăng nhập lại YouTube trên {browser}."}
+        return {"success": False,
+                "error": f"HTTP {resp.status_code}: {resp.text[:300]}"}
 
     def _auto_cookie_write_netscape(self, cookies: list[dict], path: str):
         """Write cookie list to Netscape cookies.txt format."""
@@ -3446,24 +3558,33 @@ window.__ytCaptured = window.__ytCaptured || {};
             def log_message(self, fmt, *args):
                 return
 
-        last_error = None
-        for port in range(BROWSER_DETECTOR_PORT, BROWSER_DETECTOR_PORT + 10):
-            try:
-                server = http.server.ThreadingHTTPServer(
-                    ("127.0.0.1", port), BrowserDetectorHandler)
-                self.browser_detector_port = port
-                self.browser_detector_server = server
-                self.browser_detector_thread = threading.Thread(
-                    target=server.serve_forever, daemon=True)
-                self.browser_detector_thread.start()
-                if hasattr(self, "bd_receiver_url_var"):
-                    self.bd_receiver_url_var.set(
-                        f"http://127.0.0.1:{port}/candidate")
-                self._bd_set_status(f"Receiver running on 127.0.0.1:{port}")
-                return
-            except OSError as exc:
-                last_error = exc
-        self._bd_set_status(f"Receiver failed: {last_error}")
+        # Bind a fixed port so the browser extension (which hardcodes 8765)
+        # always matches. If the port is busy we surface a clear error instead
+        # of silently moving to another port the extension can't reach.
+        port = BROWSER_DETECTOR_PORT
+        try:
+            server = http.server.ThreadingHTTPServer(
+                ("127.0.0.1", port), BrowserDetectorHandler)
+        except OSError as exc:
+            self.browser_detector_port = port
+            msg = (
+                f"Port {port} đang bị chiếm — đóng app khác hoặc tiến trình tool "
+                f"cũ đang chạy, rồi mở lại.\n({exc})"
+            )
+            self._bd_set_status(f"Receiver failed: port {port} busy")
+            self.root.after(
+                0,
+                lambda: messagebox.showerror("Browser Detector port busy", msg))
+            return
+        self.browser_detector_port = port
+        self.browser_detector_server = server
+        self.browser_detector_thread = threading.Thread(
+            target=server.serve_forever, daemon=True)
+        self.browser_detector_thread.start()
+        if hasattr(self, "bd_receiver_url_var"):
+            self.bd_receiver_url_var.set(
+                f"http://127.0.0.1:{port}/candidate")
+        self._bd_set_status(f"Receiver running on 127.0.0.1:{port}")
 
     def _stop_browser_detector_server(self):
         server = self.browser_detector_server
@@ -3565,7 +3686,7 @@ window.__ytCaptured = window.__ytCaptured || {};
                 return {"ok": True, "running": False, "job": None}
             now = time.time()
             for job in self.bd_batch_jobs:
-                if job["status"] == "opened" and now - job.get("claimed_at", 0) > 90:
+                if job["status"] == "opened" and now - job.get("claimed_at", 0) > 60:
                     job["status"] = "queued"
                     job["message"] = "retry after browser timeout"
                 if job["status"] == "queued":
@@ -3686,7 +3807,10 @@ window.__ytCaptured = window.__ytCaptured || {};
             return
         with self.bd_batch_lock:
             job = self.bd_batch_jobs_by_id.get(batch_id)
-            if not job or job["status"] in ("downloading", "done", "failed", "stopped"):
+            # Allow a late-arriving candidate to revive a job that the extension
+            # already marked "failed" on timeout — only an in-progress/finished
+            # or user-stopped job is left alone.
+            if not job or job["status"] in ("downloading", "done", "stopped"):
                 return
             job["status"] = "downloading"
             job["message"] = f"detected {candidate.get('quality', '')}"
@@ -3701,7 +3825,12 @@ window.__ytCaptured = window.__ytCaptured || {};
     def _bd_thread_download_batch_candidate(self, batch_id, candidate):
         try:
             with self.bd_batch_download_lock:
-                path = self._bd_download_candidate(candidate)
+                candidate["_progress_hook"] = self._bd_make_progress_hook(
+                    candidate.get("id", ""), 1, 1)
+                try:
+                    path = self._bd_download_candidate(candidate)
+                finally:
+                    candidate.pop("_progress_hook", None)
             with self.bd_batch_lock:
                 job = self.bd_batch_jobs_by_id.get(batch_id)
                 if job:
@@ -4065,14 +4194,23 @@ window.__ytCaptured = window.__ytCaptured || {};
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(page_url, download=True)
                 if info:
-                    return ydl.prepare_filename(info)
+                    path = ydl.prepare_filename(info)
+                    # yt-dlp may have merged/remuxed to mp4 — prefer the real file.
+                    if not os.path.exists(path):
+                        base = os.path.splitext(path)[0]
+                        for ext in (".mp4", ".mkv", ".webm"):
+                            if os.path.exists(base + ext):
+                                path = base + ext
+                                break
+                    if os.path.exists(path):
+                        return path
         finally:
             if cookiefile:
                 try:
                     os.remove(cookiefile)
                 except OSError:
                     pass
-        return outtmpl
+        raise RuntimeError("yt-dlp không tạo được file tải về từ trang YouTube")
 
     def _bd_headers_for_ytdlp(self, candidate):
         headers = dict(candidate.get("headers") or {})
@@ -4110,11 +4248,13 @@ window.__ytCaptured = window.__ytCaptured || {};
             return ""
         fd, path = tempfile.mkstemp(prefix="bd_youtube_", suffix=".cookies.txt")
         domains = [".youtube.com", ".google.com", ".googlevideo.com"]
+        # Use a far-future expiry so yt-dlp doesn't drop these as session cookies.
+        expires = int(time.time()) + 365 * 24 * 3600
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write("# Netscape HTTP Cookie File\n")
             for domain in domains:
                 for name, value in pairs:
-                    f.write(f"{domain}\tTRUE\t/\tTRUE\t0\t{name}\t{value}\n")
+                    f.write(f"{domain}\tTRUE\t/\tTRUE\t{expires}\t{name}\t{value}\n")
         return path
 
     def _bd_cookiefile_from_browser_cookies(self, candidate):
@@ -4166,17 +4306,25 @@ window.__ytCaptured = window.__ytCaptured || {};
         quality = self._bd_safe_filename(video_candidate.get("quality") or "video")
         out_path = os.path.join(
             self.browser_output_dir, f"{title}_{quality}_{int(time.time())}.mp4")
-        cmd = [ffmpeg, "-y", "-loglevel", "error"]
         video_headers = self._bd_ffmpeg_headers(video_candidate.get("headers", {}))
         audio_headers = self._bd_ffmpeg_headers(audio_candidate.get("headers", {}))
-        if video_headers:
-            cmd.extend(["-headers", video_headers])
-        cmd.extend(["-i", video_candidate["media_url"]])
-        if audio_headers:
-            cmd.extend(["-headers", audio_headers])
-        cmd.extend(["-i", audio_candidate["media_url"],
-                    "-c:v", "copy", "-c:a", "aac", "-shortest", out_path])
-        result = subprocess.run(cmd, capture_output=True)
+
+        def build_cmd(audio_codec):
+            cmd = [ffmpeg, "-y", "-loglevel", "error"]
+            if video_headers:
+                cmd.extend(["-headers", video_headers])
+            cmd.extend(["-i", video_candidate["media_url"]])
+            if audio_headers:
+                cmd.extend(["-headers", audio_headers])
+            cmd.extend(["-i", audio_candidate["media_url"],
+                        "-c:v", "copy", "-c:a", audio_codec, "-shortest", out_path])
+            return cmd
+
+        # Try stream-copy first (fast, lossless); fall back to AAC re-encode
+        # only if the audio codec isn't mp4-compatible.
+        result = subprocess.run(build_cmd("copy"), capture_output=True)
+        if result.returncode != 0:
+            result = subprocess.run(build_cmd("aac"), capture_output=True)
         if result.returncode != 0:
             stderr = result.stderr.decode(errors="replace")[-500:]
             raise RuntimeError(f"ffmpeg merge failed: {stderr}")
@@ -4206,10 +4354,18 @@ window.__ytCaptured = window.__ytCaptured || {};
             info = ydl.extract_info(candidate["media_url"], download=True)
             if info:
                 try:
-                    return ydl.prepare_filename(info)
+                    path = ydl.prepare_filename(info)
                 except Exception:
-                    return outtmpl
-        return outtmpl
+                    path = ""
+                if path and not os.path.exists(path):
+                    base = os.path.splitext(path)[0]
+                    for ext in (".mp4", ".mkv", ".webm"):
+                        if os.path.exists(base + ext):
+                            path = base + ext
+                            break
+                if path and os.path.exists(path):
+                    return path
+        raise RuntimeError("yt-dlp không tạo được file tải về")
 
     def _bd_progress_hook(self, data):
         """Global progress hook — updates progress bar only (no candidate_id context)."""
@@ -9061,7 +9217,7 @@ https://developers.google.com/youtube/v3/quickstart/python
         desc_frame.pack(fill=tk.X, pady=(0, 15))
         
         desc_text = tk.Text(desc_frame, height=6, font=('Segoe UI', 10), wrap=tk.WORD)
-        desc_text.insert('1.0', "Current description not available in demo mode.\nIn real mode, this would show the actual video description.")
+        desc_text.insert('1.0', video.get('description', ''))
         desc_text.pack(fill=tk.X, padx=10, pady=10)
         
         # Privacy settings
@@ -9070,11 +9226,52 @@ https://developers.google.com/youtube/v3/quickstart/python
         
         privacy_var = tk.StringVar(value=video.get('status', 'public'))
         privacy_options = ['public', 'unlisted', 'private']
-        
+
         for option in privacy_options:
             tk.Radiobutton(privacy_frame, text=option.title(), variable=privacy_var, value=option,
-                          font=('Segoe UI', 10), bg=self.colors['light']).pack(anchor=tk.W, padx=10, pady=2)
-        
+                          font=('Segoe UI', 10), bg=self.colors['light'],
+                          command=lambda: _toggle_share()).pack(anchor=tk.W, padx=10, pady=2)
+
+        # Private share (specific emails) — only meaningful for private videos.
+        share_frame = tk.LabelFrame(content, text="📧 Share riêng tư (chỉ video Private)",
+                                    font=('Segoe UI', 10, 'bold'))
+        share_frame.pack(fill=tk.X, pady=(0, 15))
+
+        tk.Label(share_frame,
+                 text="Nhập email (cách nhau bởi dấu phẩy). Tối đa 50 người. "
+                      "Dùng cookie trình duyệt đang đăng nhập YouTube.",
+                 font=('Segoe UI', 9), bg=self.colors['light'],
+                 wraplength=600, justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=(10, 5))
+
+        share_row = tk.Frame(share_frame, bg=self.colors['light'])
+        share_row.pack(fill=tk.X, padx=10, pady=(0, 5))
+        tk.Label(share_row, text="Browser:", font=('Segoe UI', 9),
+                 bg=self.colors['light']).pack(side=tk.LEFT)
+        share_browser_var = tk.StringVar(value="chrome")
+        ttk.Combobox(share_row, textvariable=share_browser_var, width=12,
+                     state="readonly",
+                     values=["chrome", "edge", "brave", "chromium", "vivaldi"]
+                     ).pack(side=tk.LEFT, padx=(5, 0))
+
+        share_emails_entry = tk.Text(share_frame, height=2, font=('Segoe UI', 10), wrap=tk.WORD)
+        share_emails_entry.pack(fill=tk.X, padx=10, pady=(0, 8))
+
+        share_btn = tk.Button(
+            share_frame, text="🔗 Share Private qua email",
+            command=lambda: self._do_share_private(
+                video, share_emails_entry, share_browser_var, share_btn),
+            bg=self.colors['secondary'], fg='white', relief=tk.FLAT,
+            font=('Segoe UI', 10, 'bold'))
+        share_btn.pack(anchor=tk.W, padx=10, pady=(0, 10))
+
+        def _toggle_share():
+            is_private = privacy_var.get() == 'private'
+            state = tk.NORMAL if is_private else tk.DISABLED
+            share_btn.config(state=state)
+            share_emails_entry.config(state=state)
+
+        _toggle_share()
+
         # Tags
         tags_frame = tk.LabelFrame(content, text="🏷️ Tags", font=('Segoe UI', 10, 'bold'))
         tags_frame.pack(fill=tk.X, pady=(0, 15))
@@ -9083,17 +9280,20 @@ https://developers.google.com/youtube/v3/quickstart/python
                 font=('Segoe UI', 9), bg=self.colors['light']).pack(anchor=tk.W, padx=10, pady=(10, 5))
         
         tags_entry = tk.Text(tags_frame, height=3, font=('Segoe UI', 10), wrap=tk.WORD)
-        tags_entry.insert('1.0', "douyin, viral, entertainment, shorts")
+        existing_tags = video.get('tags') or []
+        if isinstance(existing_tags, list):
+            tags_entry.insert('1.0', ", ".join(existing_tags))
         tags_entry.pack(fill=tk.X, padx=10, pady=(0, 10))
         
-        # Warning
+        # Note
         warning_frame = tk.Frame(content, bg=self.colors['warning'])
         warning_frame.pack(fill=tk.X, pady=(15, 20))
-        
-        tk.Label(warning_frame, 
-                text="⚠️ Demo Mode: Changes will not be applied to actual YouTube video\nFor real editing, OAuth authentication is required",
+
+        tk.Label(warning_frame,
+                text="ℹ️ 'Save Changes' cập nhật title/mô tả/privacy/tags thật qua YouTube API.\n"
+                     "'Share Private qua email' dùng cookie trình duyệt (API chính thức không hỗ trợ).",
                 font=('Segoe UI', 10, 'bold'), bg=self.colors['warning'], fg=self.colors['dark']).pack(pady=10)
-        
+
         # Buttons
         button_frame = tk.Frame(content, bg=self.colors['light'])
         button_frame.pack(fill=tk.X, pady=(20, 0))
@@ -9108,31 +9308,142 @@ https://developers.google.com/youtube/v3/quickstart/python
                  bg=self.colors['medium'], fg='white', relief=tk.FLAT,
                  font=('Segoe UI', 11, 'bold')).pack(side=tk.LEFT)
                  
-    def save_video_changes(self, window, video, title_widget, desc_widget, privacy_var, tags_widget):
-        """Save video changes"""
+    def _update_video_tree_row(self, video_id, new_title, new_privacy):
+        """Update the visible Video Manager tree row for a given video id."""
         try:
-            new_title = title_widget.get('1.0', 'end-1c')
-            new_desc = desc_widget.get('1.0', 'end-1c')
+            tree = getattr(self, 'video_tree', None)
+            if not tree:
+                return
+            for item, vid in list(self.current_video_data.items()):
+                if vid.get('id') == video_id:
+                    vals = list(tree.item(item, 'values'))
+                    # columns: (title, views, privacy, published, duration)
+                    if len(vals) >= 3:
+                        vals[0] = new_title
+                        vals[2] = new_privacy.title()
+                        tree.item(item, values=vals)
+                    break
+        except Exception:
+            pass
+
+    def save_video_changes(self, window, video, title_widget, desc_widget, privacy_var, tags_widget):
+        """Save video changes via the YouTube Data API (videos.update)."""
+        try:
+            new_title = title_widget.get('1.0', 'end-1c').strip()
+            new_desc = desc_widget.get('1.0', 'end-1c').strip()
             new_privacy = privacy_var.get()
-            new_tags = tags_widget.get('1.0', 'end-1c')
-            
-            # In demo mode, just show what would be saved
-            if not self.youtube_uploader or self.youtube_uploader.service == 'demo_service':
-                messagebox.showinfo("Demo Mode", 
-                    f"Changes would be saved:\n\n" +
-                    f"📹 Title: {new_title[:50]}...\n" +
-                    f"🔒 Privacy: {new_privacy}\n" +
-                    f"🏷️ Tags: {new_tags[:30]}...\n\n" +
-                    f"To apply real changes, use OAuth authentication.")
+            new_tags_raw = tags_widget.get('1.0', 'end-1c')
+            new_tags = [t.strip() for t in new_tags_raw.split(',') if t.strip()]
+
+            if not new_title:
+                messagebox.showwarning("Thiếu tiêu đề", "Tiêu đề không được để trống.")
+                return
+
+            # Demo mode → just preview
+            if not self.youtube_uploader or self.youtube_uploader.service == 'demo_service' \
+                    or not getattr(self.youtube_uploader, 'youtube', None):
+                messagebox.showinfo("Demo Mode",
+                    f"Changes would be saved:\n\n"
+                    f"📹 Title: {new_title[:50]}\n"
+                    f"🔒 Privacy: {new_privacy}\n"
+                    f"🏷️ Tags: {', '.join(new_tags)[:50]}\n\n"
+                    f"Đăng nhập YouTube (OAuth) để áp dụng thật.")
                 window.destroy()
                 return
-            
-            # Real save would go here
-            messagebox.showinfo("Success", "Video changes saved successfully!")
+
+            video_id = video.get('id', '')
+            if not video_id:
+                messagebox.showerror("Error", "Không tìm thấy video_id.")
+                return
+
+            youtube = self.youtube_uploader.youtube
+
+            # videos.update replaces the whole snippet — categoryId is required,
+            # so fetch the current snippet first and patch the fields we changed.
+            resp = youtube.videos().list(part="snippet,status", id=video_id).execute()
+            items = resp.get('items', [])
+            if not items:
+                messagebox.showerror("Error", "Không lấy được thông tin video từ YouTube.")
+                return
+            snippet = items[0].get('snippet', {})
+            status = items[0].get('status', {})
+
+            snippet['title'] = new_title
+            snippet['description'] = new_desc
+            snippet['tags'] = new_tags
+            if not snippet.get('categoryId'):
+                snippet['categoryId'] = '22'
+            status['privacyStatus'] = new_privacy
+
+            try:
+                youtube.videos().update(
+                    part="snippet,status",
+                    body={"id": video_id, "snippet": snippet, "status": status}
+                ).execute()
+            except Exception as api_err:
+                msg = str(api_err)
+                if 'insufficient' in msg.lower() or 'scope' in msg.lower() or 'forbidden' in msg.lower():
+                    messagebox.showerror(
+                        "Thiếu quyền",
+                        "Tài khoản chưa cấp quyền chỉnh sửa.\n\n"
+                        "Hãy xóa token và Login YouTube lại để cấp quyền "
+                        "'youtube.force-ssl', rồi thử lại.")
+                    return
+                raise
+
+            # Reflect changes in the local cache + visible tree row
+            video['title'] = new_title
+            video['status'] = new_privacy
+            self._update_video_tree_row(video_id, new_title, new_privacy)
+            messagebox.showinfo("Thành công", "✅ Đã cập nhật video trên YouTube!")
             window.destroy()
-            
+
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to save changes: {str(e)}")
+            messagebox.showerror("Error", f"Cập nhật thất bại: {str(e)}")
+
+    def _do_share_private(self, video, emails_widget, browser_var, btn):
+        """Share a private video with specific emails via Studio cookies."""
+        emails_str = emails_widget.get('1.0', 'end-1c').strip()
+        if not emails_str:
+            messagebox.showwarning("Thiếu email", "Nhập ít nhất một email.")
+            return
+
+        # Basic email sanity check
+        candidates = [e.strip() for e in emails_str.split(',') if e.strip()]
+        bad = [e for e in candidates if '@' not in e or '.' not in e.split('@')[-1]]
+        if bad:
+            messagebox.showwarning("Email không hợp lệ",
+                                   "Email sai định dạng:\n" + "\n".join(bad[:5]))
+            return
+        if len(candidates) > 50:
+            messagebox.showwarning("Quá giới hạn",
+                                   "YouTube chỉ cho share tối đa 50 người.")
+            return
+
+        video_id = video.get('id', '')
+        if not video_id:
+            messagebox.showerror("Error", "Không tìm thấy video_id.")
+            return
+
+        browser = browser_var.get()
+
+        def _worker():
+            self.root.after(0, lambda: btn.config(state=tk.DISABLED, text="⏳ Đang share..."))
+            result = self._studio_share_private(video_id, emails_str, browser)
+
+            def _done():
+                btn.config(state=tk.NORMAL, text="🔗 Share Private qua email")
+                if result.get('success'):
+                    shared = result.get('shared_with', candidates)
+                    messagebox.showinfo(
+                        "Đã share",
+                        "✅ Đã share video với:\n" + "\n".join(shared))
+                else:
+                    messagebox.showerror(
+                        "Share thất bại", result.get('error', 'Unknown error'))
+            self.root.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True).start()
             
     def perform_video_delete(self, video, item):
         """Perform actual video deletion"""
@@ -9202,18 +9513,56 @@ class ToolTip:
             self.tooltip.destroy()
             self.tooltip = None
 
+def _start_hang_watchdog(root):
+    """Detect a frozen Tk mainloop (UI 'Not Responding') and dump every thread's
+    stack to HANG_WATCHDOG_LOG so a hang can be diagnosed after the fact.
+
+    Works by scheduling a heartbeat via root.after() — if the mainloop is
+    pumping normally the heartbeat timestamp advances every ~1s. A separate
+    daemon thread (which keeps running even if the mainloop is stuck) checks
+    that timestamp and dumps tracebacks if it goes stale.
+    """
+    state = {"last_beat": time.monotonic(), "dumped_at": 0.0}
+
+    def _beat():
+        state["last_beat"] = time.monotonic()
+        root.after(1000, _beat)
+
+    def _watch():
+        while True:
+            time.sleep(2)
+            stale_for = time.monotonic() - state["last_beat"]
+            if stale_for < HANG_WATCHDOG_TIMEOUT:
+                continue
+            # Avoid spamming the log while the hang continues.
+            if time.monotonic() - state["dumped_at"] < 60:
+                continue
+            state["dumped_at"] = time.monotonic()
+            try:
+                with open(HANG_WATCHDOG_LOG, "a", encoding="utf-8") as f:
+                    f.write(f"\n=== UI hang detected at {datetime.now().isoformat(timespec='seconds')} "
+                            f"(no mainloop heartbeat for {stale_for:.1f}s) ===\n")
+                    faulthandler.dump_traceback(file=f, all_threads=True)
+            except Exception:
+                pass
+
+    root.after(1000, _beat)
+    threading.Thread(target=_watch, daemon=True).start()
+
+
 def main():
     """Run the application"""
     root = tk.Tk()
     root.minsize(1200, 800)
-    
+
     # Center window
     root.update_idletasks()
     x = (root.winfo_screenwidth() // 2) - (root.winfo_width() // 2)
     y = (root.winfo_screenheight() // 2) - (root.winfo_height() // 2)
     root.geometry(f"+{x}+{y}")
-    
+
     app = DouyinYouTubeTool(root)
+    _start_hang_watchdog(root)
     root.mainloop()
 
 if __name__ == "__main__":

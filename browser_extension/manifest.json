@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "Detects clear media requests and sends them to the local downloader app.",
   "permissions": [
+    "alarms",
     "cookies",
     "storage",
     "tabs",
